@@ -1,0 +1,25 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "devctk"
+version = "0.1.2"
+description = "One-command SSH-accessible rootless Podman dev containers"
+requires-python = ">=3.10"
+license = "MIT"
+authors = [{ name = "y" }]
+classifiers = [
+    "Environment :: Console",
+    "Operating System :: POSIX :: Linux",
+    "Topic :: Software Development",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/devctk"]
+
+[dependency-groups]
+dev = ["pytest"]
+
+[project.scripts]
+devctk = "devctk.cli:main"
