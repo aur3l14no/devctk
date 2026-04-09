@@ -8,11 +8,11 @@ version = "0.2.0"
 description = "One-command rootless Podman dev containers with Nix and agent support"
 requires-python = ">=3.11"
 license = "MIT"
-authors = [{ name = "y" }]
+authors = [{ name = "aur3l14no" }]
 classifiers = [
-    "Environment :: Console",
-    "Operating System :: POSIX :: Linux",
-    "Topic :: Software Development",
+  "Environment :: Console",
+  "Operating System :: POSIX :: Linux",
+  "Topic :: Software Development",
 ]
 
 [tool.hatch.build.targets.wheel]
