@@ -24,7 +24,7 @@ WantedBy=default.target
 """,
     "sshd": """\
 [Unit]
-Description=devctk OpenSSH server in $container_name
+Description=devctk sshd in $container_name
 Requires=$container_unit
 After=$container_unit
 BindsTo=$container_unit
@@ -35,7 +35,6 @@ Type=simple
 TimeoutStartSec=300
 Restart=always
 RestartSec=5
-ExecStartPre=$sshd_helper bootstrap
 ExecStart=$sshd_helper start
 ExecStop=$sshd_helper stop
 

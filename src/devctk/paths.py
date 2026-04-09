@@ -20,8 +20,9 @@ class ManagedPaths:
     helper_dir: pathlib.Path
     metadata: pathlib.Path
     container_unit: pathlib.Path
-    sshd_unit: pathlib.Path
     container_helper: pathlib.Path
+    bootstrap_helper: pathlib.Path
+    sshd_unit: pathlib.Path
     sshd_helper: pathlib.Path
 
 
@@ -34,7 +35,8 @@ def managed_paths(name: str) -> ManagedPaths:
         helper_dir=helpers,
         metadata=helpers / f"{name}.json",
         container_unit=units / f"{name}.service",
-        sshd_unit=units / f"{name}-sshd.service",
         container_helper=helpers / f"{name}-container.sh",
+        bootstrap_helper=helpers / f"{name}-bootstrap.sh",
+        sshd_unit=units / f"{name}-sshd.service",
         sshd_helper=helpers / f"{name}-sshd.sh",
     )

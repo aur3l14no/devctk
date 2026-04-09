@@ -10,7 +10,7 @@ import stat
 import sys
 
 from devctk.paths import ManagedPaths, managed_paths, state_root, STATE_DIR_NAME
-from devctk.helpers import render_container_helper, render_sshd_helper
+from devctk.helpers import render_bootstrap, render_container_helper, render_sshd_helper
 from devctk.systemd import render_unit
 from devctk.util import require_binary, run, write_text, unlink_if_exists
 
@@ -19,116 +19,208 @@ from devctk.util import require_binary, run, write_text, unlink_if_exists
 # init
 # ---------------------------------------------------------------------------
 
-def resolve_authorized_keys(args: argparse.Namespace) -> tuple[pathlib.Path | None, str | None, str]:
-    """Return (file_path | None, text | None, source_tag)."""
+def resolve_authorized_keys(args: argparse.Namespace) -> tuple[pathlib.Path | None, str | None]:
+    """Return (file_path | None, text | None)."""
     if args.authorized_keys_file is not None:
         p = pathlib.Path(args.authorized_keys_file).expanduser().resolve()
         if not p.is_file():
             raise SystemExit(f"authorized_keys file not found: {p}")
         if p.stat().st_size == 0:
             raise SystemExit(f"authorized_keys file is empty: {p}")
-        return p, None, "file"
+        return p, None
     text = args.authorized_keys_text
     if not text or not text.strip():
         raise SystemExit("authorized_keys text is empty")
-    return None, text, "inline"
+    return None, text
 
 
-def build_workspace_mount(workspace: str | None, no_workspace: bool, container_user: str) -> tuple[str | None, str]:
-    home = f"/home/{container_user}"
-    if no_workspace:
-        return None, home
-    if workspace is None:
-        d = pathlib.Path.home() / "dev-container"
-        d.mkdir(parents=True, exist_ok=True)
-        return f"type=bind,src={d},target={home},rw", home
+def build_workspace_mount(
+    workspace: str | None,
+    mirror: bool,
+    user: str,
+    container_name: str,
+    container_home: str,
+) -> str:
+    """Return a podman ``--mount`` spec string for the workspace."""
+    if mirror:
+        src = pathlib.Path(workspace).expanduser().resolve() if workspace else pathlib.Path.cwd().resolve()
+        if src == pathlib.Path.home():
+            raise SystemExit("--mirror: refusing to mount entire home directory")
+        src.mkdir(parents=True, exist_ok=True)
+        return f"type=bind,src={src},target={src},rw"
 
-    # Check if it's a full mount spec
-    fields = {k: v for k, _, v in (p.partition("=") for p in workspace.split(",")) if v}
-    if {"type", "src", "source", "target", "destination", "dst"} & fields.keys():
-        target = fields.get("target") or fields.get("destination") or fields.get("dst")
-        if not target:
-            raise SystemExit("--workspace mount spec must include target=...")
-        return workspace, target
-
-    d = pathlib.Path(workspace).expanduser().resolve()
-    d.mkdir(parents=True, exist_ok=True)
-    return f"type=bind,src={d},target={home},rw", home
+    if workspace:
+        src = pathlib.Path(workspace).expanduser().resolve()
+    else:
+        src = pathlib.Path.home() / "devctk" / container_name
+    src.mkdir(parents=True, exist_ok=True)
+    return f"type=bind,src={src},target={container_home}/workspace,rw"
 
 
 def cmd_init(args: argparse.Namespace, passthrough: list[str]) -> int:
     from devctk.cli import NAME_RE
 
     user = os.environ.get("USER") or pathlib.Path.home().name
-    container_user = args.container_user or user
     container_name = args.container_name or f"{user}-dev"
+    container_home = f"/home/{user}"
+    uid = os.getuid()
+    gid = os.getgid()
 
-    if not NAME_RE.match(container_user):
-        raise SystemExit(f"invalid container user: {container_user}")
     if not NAME_RE.match(container_name):
         raise SystemExit(f"invalid container name: {container_name}")
-    if not 1 <= args.port <= 65535:
+    if args.ssh and not 1 <= args.port <= 65535:
         raise SystemExit(f"invalid port: {args.port}")
-    if args.no_workspace and args.workspace:
-        raise SystemExit("--workspace and --no-workspace conflict")
 
-    ak_file, ak_text, ak_source = resolve_authorized_keys(args)
-    workspace_mount, container_home = build_workspace_mount(args.workspace, args.no_workspace, container_user)
+    # Authorized keys
+    ak_file: pathlib.Path | None = None
+    ak_text: str | None = None
+    if args.ssh:
+        ak_file, ak_text = resolve_authorized_keys(args)
 
-    mounts = list(args.mount)
+    # Workspace
+    workspace_mount: str | None = None
+    if not args.no_workspace:
+        workspace_mount = build_workspace_mount(
+            args.workspace, args.mirror, user, container_name, container_home,
+        )
+
+    # --- Collect all container mounts ---
+    container_mounts: list[str] = []
+
+    # Workspace (first — it's the outermost bind under $HOME)
     if workspace_mount:
-        mounts.insert(0, workspace_mount)
+        container_mounts.append(workspace_mount)
 
+    # Nix
+    nix_profile_content = ""
+    if args.nix:
+        from devctk.nix import nix_mounts, nix_profile_script
+        for host, target, mode in nix_mounts(user):
+            container_mounts.append(f"type=bind,src={host},target={target},{mode}")
+        nix_profile_content = nix_profile_script(user)
+
+    # Agent config dirs
+    if args.agent:
+        from devctk.agent import agent_mounts
+        for host, target, mode in agent_mounts(args.agent, container_home):
+            container_mounts.append(f"type=bind,src={host},target={target},{mode}")
+
+    # User extra mounts
+    container_mounts.extend(args.mount)
+
+    # --- Binaries ---
     podman = require_binary("podman")
     systemctl = require_binary("systemctl")
     loginctl = require_binary("loginctl")
 
-    # Conflict checks
+    # --- Conflict checks ---
     if run([podman, "container", "exists", container_name], check=False).returncode == 0:
         raise SystemExit(f"container already exists: {container_name}")
 
     paths = managed_paths(container_name)
-    for p in [paths.container_unit, paths.sshd_unit, paths.container_helper, paths.sshd_helper, paths.metadata]:
+    managed = [paths.container_unit, paths.container_helper, paths.bootstrap_helper, paths.metadata]
+    if args.ssh:
+        managed.extend([paths.sshd_unit, paths.sshd_helper])
+    for p in managed:
         if p.exists():
             raise SystemExit(f"managed files already exist for {container_name}")
 
-    # Write helpers + units
+    # --- Write bootstrap script (container entrypoint) ---
+    write_text(
+        paths.bootstrap_helper,
+        render_bootstrap(
+            user=user,
+            uid=uid,
+            gid=gid,
+            home=container_home,
+            ssh=args.ssh,
+            nix_profile=nix_profile_content,
+            authorized_keys_file="/tmp/devctk-authorized-keys" if ak_file else None,
+            authorized_keys_text=ak_text,
+        ),
+        0o755,
+    )
+
+    # --- Internal mounts (bootstrap script + optional authorized-keys file) ---
+    internal_mounts = [
+        f"type=bind,src={paths.bootstrap_helper},target=/devctk-bootstrap.sh,ro",
+    ]
+    if ak_file:
+        internal_mounts.append(f"type=bind,src={ak_file},target=/tmp/devctk-authorized-keys,ro")
+
+    all_mounts = internal_mounts + container_mounts
+
+    # --- Write container helper ---
     write_text(
         paths.container_helper,
-        render_container_helper(podman, container_name, args.image, args.port, mounts, args.device, passthrough),
+        render_container_helper(
+            podman=podman,
+            name=container_name,
+            image=args.image,
+            mounts=all_mounts,
+            devices=args.device,
+            extra=passthrough,
+            ssh_port=args.port if args.ssh else None,
+        ),
         stat.S_IRWXU,
     )
-    write_text(
-        paths.sshd_helper,
-        render_sshd_helper(podman, container_name, container_user, os.getuid(), os.getgid(), container_home, ak_file, ak_text),
-        stat.S_IRWXU,
-    )
-    write_text(paths.container_unit, render_unit("container", container_name=container_name, container_helper=str(paths.container_helper)))
-    write_text(paths.sshd_unit, render_unit("sshd", container_name=container_name, container_unit=paths.container_unit.name, sshd_helper=str(paths.sshd_helper)))
 
-    # Metadata
+    # --- Write container unit ---
+    write_text(
+        paths.container_unit,
+        render_unit(
+            "container",
+            container_name=container_name,
+            container_helper=str(paths.container_helper),
+        ),
+    )
+
+    # --- SSH-specific files ---
+    if args.ssh:
+        write_text(
+            paths.sshd_helper,
+            render_sshd_helper(podman=podman, name=container_name),
+            stat.S_IRWXU,
+        )
+        write_text(
+            paths.sshd_unit,
+            render_unit(
+                "sshd",
+                container_name=container_name,
+                container_unit=paths.container_unit.name,
+                sshd_helper=str(paths.sshd_helper),
+            ),
+        )
+
+    # --- Metadata ---
     write_text(paths.metadata, json.dumps({
         "container_name": container_name,
-        "container_user": container_user,
         "image": args.image,
-        "port": args.port,
+        "ssh": args.ssh,
+        "port": args.port if args.ssh else None,
         "container_home": container_home,
         "workspace_mount": workspace_mount or "",
-        "authorized_keys_source": ak_source,
+        "mirror": args.mirror,
+        "nix": args.nix,
+        "agents": args.agent,
     }, indent=2, sort_keys=True) + "\n")
 
-    # Enable — rollback on failure
+    # --- Enable and start ---
     try:
         run([systemctl, "--user", "daemon-reload"])
         run([systemctl, "--user", "enable", "--now", paths.container_unit.name])
-        run([systemctl, "--user", "enable", "--now", paths.sshd_unit.name])
+        if args.ssh:
+            run([systemctl, "--user", "enable", "--now", paths.sshd_unit.name])
     except Exception:
         print(f"startup failed, cleaning up {container_name}", file=sys.stderr)
         _cleanup(podman, systemctl, paths, container_name)
         raise
 
+    # --- Success ---
     print(f"started {container_name}")
-    print(f"  ssh {container_user}@localhost -p {args.port}")
+    if args.ssh:
+        print(f"  ssh {user}@localhost -p {args.port}")
+    print(f"  podman exec -it {container_name} bash")
 
     # Linger check
     res = run([loginctl, "show-user", user, "-p", "Linger"], check=False, capture=True)
@@ -149,18 +241,24 @@ def cmd_ls() -> int:
         return 0
 
     podman = require_binary("podman")
-    systemctl = require_binary("systemctl")
 
     for name in names:
         paths = managed_paths(name)
         meta = _read_meta(paths.metadata)
         parts = [
             name,
-            f"user={meta.get('container_user', '-')}",
             f"podman={_container_status(podman, name)}",
-            f"port={meta.get('port', '-')}",
             f"image={meta.get('image', '-')}",
         ]
+        if meta.get("ssh"):
+            parts.append(f"port={meta.get('port', '-')}")
+        if meta.get("nix"):
+            parts.append("nix")
+        agents = meta.get("agents", [])
+        if agents:
+            parts.append(f"agents={','.join(agents)}")
+        if meta.get("mirror"):
+            parts.append("mirror")
         print("  ".join(parts))
     return 0
 
@@ -188,7 +286,11 @@ def cmd_rm(args: argparse.Namespace) -> int:
 
     for name in names:
         paths = managed_paths(name)
-        exists = any(p.exists() for p in [paths.metadata, paths.container_helper, paths.sshd_helper, paths.container_unit, paths.sshd_unit])
+        all_paths = [
+            paths.metadata, paths.container_helper, paths.bootstrap_helper,
+            paths.sshd_helper, paths.container_unit, paths.sshd_unit,
+        ]
+        exists = any(p.exists() for p in all_paths)
         exists = exists or run([podman, "container", "exists", name], check=False).returncode == 0
 
         if not exists:
@@ -214,7 +316,8 @@ def _cleanup(podman: str, systemctl: str, paths: ManagedPaths, name: str) -> Non
     if res.returncode != 0:
         print(f"warning: podman rm failed for {name}: {res.stderr.strip()}", file=sys.stderr)
 
-    for p in [paths.container_unit, paths.sshd_unit, paths.container_helper, paths.sshd_helper, paths.metadata]:
+    for p in [paths.container_unit, paths.sshd_unit, paths.sshd_helper,
+              paths.container_helper, paths.bootstrap_helper, paths.metadata]:
         unlink_if_exists(p)
 
     if paths.helper_dir.exists() and not any(paths.helper_dir.iterdir()):
@@ -232,6 +335,8 @@ def list_names() -> list[str]:
         names.add(p.stem)
     for p in d.glob("*-container.sh"):
         names.add(p.name.removesuffix("-container.sh"))
+    for p in d.glob("*-bootstrap.sh"):
+        names.add(p.name.removesuffix("-bootstrap.sh"))
     return sorted(names)
 
 

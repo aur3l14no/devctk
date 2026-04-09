@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import argparse
 import os
-import pathlib
 import re
 import sys
 
@@ -13,7 +12,7 @@ COMMANDS = {"init", "ls", "rm"}
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="devctk",
-        description="One-command SSH-accessible rootless Podman dev containers.",
+        description="One-command rootless Podman dev containers.",
     )
     sub = parser.add_subparsers(dest="command")
     sub.required = True
@@ -21,14 +20,27 @@ def build_parser() -> argparse.ArgumentParser:
     # --- init ---
     p_init = sub.add_parser("init", help="Create and enable a dev container.")
     p_init.add_argument("--image", required=True)
+    p_init.add_argument("--name", dest="container_name")
+
+    # SSH (opt-in)
+    p_init.add_argument("--ssh", action="store_true", help="Enable SSH access")
     p_init.add_argument("--port", type=int, default=39000)
-    keys = p_init.add_mutually_exclusive_group(required=True)
+    keys = p_init.add_mutually_exclusive_group()
     keys.add_argument("--authorized-keys", dest="authorized_keys_text")
     keys.add_argument("--authorized-keys-file", dest="authorized_keys_file")
-    p_init.add_argument("--container-name")
-    p_init.add_argument("--container-user")
+
+    # Features
+    p_init.add_argument("--nix", action="store_true", help="Mount Nix store and set PATH")
+    p_init.add_argument("--agent", action="append", default=[], choices=["claude", "codex"],
+                        help="Mount agent config dirs (repeatable)")
+
+    # Workspace
     p_init.add_argument("--workspace")
     p_init.add_argument("--no-workspace", action="store_true")
+    p_init.add_argument("--mirror", action="store_true",
+                        help="Mount workspace at same absolute path as host")
+
+    # Extra podman flags
     p_init.add_argument("--mount", action="append", default=[])
     p_init.add_argument("--device", action="append", default=[])
 
@@ -44,7 +56,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def normalize_argv(argv: list[str]) -> list[str]:
-    """Treat bare args (no subcommand) as `init`."""
+    """Treat bare args (no subcommand) as ``init``."""
     if not argv:
         return argv
     if argv[0] in COMMANDS or argv[0] in {"-h", "--help"}:
@@ -87,9 +99,26 @@ def main() -> int:
 
     if args.command == "init":
         validate_passthrough(passthrough)
+
+        # SSH flag dependencies
+        if args.ssh:
+            if not args.authorized_keys_text and not args.authorized_keys_file:
+                raise SystemExit("--ssh requires --authorized-keys or --authorized-keys-file")
+        else:
+            if args.authorized_keys_text or args.authorized_keys_file:
+                raise SystemExit("--authorized-keys requires --ssh")
+
+        # Workspace conflicts
+        if args.no_workspace and args.workspace:
+            raise SystemExit("--workspace and --no-workspace conflict")
+        if args.no_workspace and args.mirror:
+            raise SystemExit("--mirror and --no-workspace conflict")
+
         return cmd_init(args, passthrough)
+
     if args.command == "ls":
         return cmd_ls()
+
     if args.command == "rm":
         return cmd_rm(args)
 
