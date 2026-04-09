@@ -43,10 +43,11 @@ def nix_path_entries(host_user: str) -> list[str]:
     return entries
 
 
-def nix_profile_script(host_user: str) -> str:
+def nix_profile_script(host_user: str, include_mise: bool = False) -> str:
     """Content for /etc/profile.d/99-devctk-nix.sh (sourced by SSH login shells)."""
     entries = nix_path_entries(host_user)
-    entries.extend(mise_path_entries())
+    if include_mise:
+        entries.extend(mise_path_entries())
     if not entries:
         return ""
     path_prepend = ":".join(entries)

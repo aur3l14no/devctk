@@ -31,6 +31,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     # Features
     p_init.add_argument("--nix", action="store_true", help="Mount Nix store and set PATH")
+    p_init.add_argument("--mise", action="store_true", help="Mount mise tool installs and set PATH")
     p_init.add_argument("--agent", action="append", default=[], choices=["claude", "codex"],
                         help="Mount agent config dirs (repeatable)")
 

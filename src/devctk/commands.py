@@ -103,18 +103,24 @@ def cmd_init(args: argparse.Namespace, passthrough: list[str]) -> int:
     # Nix + mise
     nix_profile_content = ""
     container_env: list[str] = []
+    path_parts: list[str] = []
     if args.nix:
-        from devctk.nix import nix_mounts, nix_path_entries, nix_profile_script
-        from devctk.nix import mise_mounts, mise_path_entries
+        from devctk.nix import nix_mounts, nix_path_entries
         for host, target, mode in nix_mounts(user):
             container_mounts.append(f"type=bind,src={host},target={target},{mode}")
+        path_parts.extend(nix_path_entries(user))
+    if args.mise:
+        from devctk.nix import mise_mounts, mise_path_entries
         for host, target, mode in mise_mounts():
             container_mounts.append(f"type=bind,src={host},target={target},{mode}")
-        nix_profile_content = nix_profile_script(user)
-        # PATH for podman exec sessions (not just SSH login shells)
-        path_parts = nix_path_entries(user) + mise_path_entries()
+        path_parts.extend(mise_path_entries())
+    if path_parts:
         path_parts += ["/usr/local/bin", "/usr/bin", "/bin", "/usr/sbin", "/sbin"]
         container_env.append(f"PATH={':'.join(path_parts)}")
+        # profile.d script for SSH login shells
+        path_prepend = ":".join(p for p in path_parts if p.startswith(("/nix/", "/etc/profiles/", "/run/current-system/")) or "mise" in p)
+        if path_prepend:
+            nix_profile_content = f'export PATH="{path_prepend}:$PATH"\n'
 
     # Agent config dirs
     if args.agent:
