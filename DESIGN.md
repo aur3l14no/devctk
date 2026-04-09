@@ -1,14 +1,14 @@
 # devctk
 
-One-command rootless Podman dev containers, managed by systemd user services.
+One-command rootless Podman dev containers.
 
 ```
 devctk init --image ubuntu:24.04
-devctk init --image ubuntu:24.04 --ssh --authorized-keys-file ~/.ssh/authorized_keys
+devctk init --image ubuntu:24.04 --systemd --ssh --authorized-keys-file ~/.ssh/authorized_keys
 devctk init --image alpine:latest --nix --agent claude --mirror --workspace ~/projects/myapp
 ```
 
-You get: a running container with your UID mapped in, workspace bind-mounted, passwordless sudo, auto-start via systemd, and optionally SSH + Nix tools + agent configs.
+You get: a running container with your UID mapped in, workspace bind-mounted, passwordless sudo, and optionally SSH + Nix/mise tools + agent configs + systemd persistence.
 
 ## Distribution
 
@@ -17,17 +17,18 @@ You get: a running container with your UID mapped in, workspace bind-mounted, pa
 
 ## Host Requirements
 
-Podman (rootless), systemd, loginctl. Refuses to run as root.
+Podman (rootless). systemd optional (for `--systemd` mode).
 
 ## Commands
 
 **`init`** (default) — create and start a dev container.
 
 - `--image` (required)
-- `--name` (default `<user>-dev`)
+- `--name` (default `<workspace>-<slug>` or `<user>-dev`)
+- `--systemd` — manage via systemd user units (auto-start on boot)
 - `--ssh` — enable SSH access (requires `--authorized-keys` or `--authorized-keys-file`)
 - `--port` (default 39000, requires `--ssh`)
-- `--nix` — mount Nix store + profiles, set PATH
+- `--nix` — mount Nix store + profiles + mise tools, set PATH
 - `--agent claude|codex` (repeatable) — mount agent config dirs
 - `--mirror` — workspace at same absolute path as host
 - `--workspace PATH` (default `~/devctk/<name>`)
@@ -36,33 +37,45 @@ Podman (rootless), systemd, loginctl. Refuses to run as root.
 
 **`ls`** — list managed containers with status.
 
-**`rm [NAME] [--all]`** — stop and remove container, units, and state.
+**`rm [NAME] [--all]`** — stop and remove container and state.
+
+## Lifecycle Modes
+
+### Inline (default)
+
+Container is created, started, and bootstrapped directly via podman commands. No systemd units. The container stays running until stopped manually or the host reboots. Access via `podman exec -it NAME bash`.
+
+### Systemd (`--systemd`)
+
+Container is managed by systemd user units with auto-restart and boot persistence. Requires `loginctl enable-linger` for the user. If `--ssh` is enabled, a second unit manages sshd.
 
 ## What `init` Does
 
-1. Write a bootstrap script (container entrypoint) to the state dir
-2. Create rootless Podman container (`--userns keep-id`, `--init`, bootstrap as entrypoint)
-3. Bootstrap runs on every container start (idempotent):
+1. Create rootless Podman container (`--userns keep-id`, `--init`, `sleep infinity`)
+2. Start container (inline: `podman start`; systemd: `systemctl enable --now`)
+3. Bootstrap via `podman exec --user root` (ExecStartPost in systemd mode):
    - Detect package manager (apt/apk), install sudo + bash if missing
    - Create user matching host UID/GID with passwordless sudo
    - If `--nix`: write `/etc/profile.d/99-devctk-nix.sh`
-   - If `--ssh`: install sshd, configure key-only auth, write sshd config
-   - Signal readiness via `/run/devctk-ready`, then exec `sleep infinity`
-4. Install systemd user unit for the container
-5. If `--ssh`: install a second unit for sshd (waits for bootstrap readiness)
-6. Enable and start
+   - If `--ssh`: install sshd, configure key-only auth
+   - Signal readiness via `/run/devctk-ready`
+4. If `--systemd --ssh`: start sshd unit (waits for bootstrap readiness)
 
 ## Features
 
 ### SSH (`--ssh`)
 
-SSH access via `ssh user@localhost -p PORT`. Requires authorized keys. Installs sshd inside the container, binds to 127.0.0.1 only. Managed by a separate systemd unit that depends on the container unit.
+SSH access via `ssh user@localhost -p PORT`. Requires authorized keys. Installs sshd inside the container, binds to 127.0.0.1 only. With `--systemd`, managed by a separate unit that depends on the container unit.
 
 Without `--ssh`, access the container via `podman exec -it NAME bash`.
 
 ### Nix (`--nix`)
 
-Mounts `/nix/store`, `/etc/profiles/per-user/<user>`, and `/run/current-system` read-only. Uses unresolved symlink-tree paths (not `.resolve()`) so mounts survive `nixos-rebuild` + garbage collection. Writes PATH to `/etc/profile.d/` for SSH login shells.
+Mounts `/nix/store`, `/etc/profiles/per-user/<user>`, and `/run/current-system` read-only. Uses unresolved symlink-tree paths so mounts survive `nixos-rebuild` + garbage collection.
+
+Also mounts `~/.local/share/mise/installs` if present (mise-managed tools).
+
+Sets PATH via `-e` at container create time (for `podman exec` sessions) and writes `/etc/profile.d/` (for SSH login shells).
 
 ### Agent configs (`--agent claude|codex`)
 
@@ -76,20 +89,28 @@ No preprocessing — mount as-is. Container detection for scripts: check `/run/.
 
 Mounts workspace at the same absolute path in host and container. Enables agent session continuity (e.g., Claude's project history is keyed by absolute path). Refuses to mount `$HOME` itself. Default workspace in mirror mode: current directory.
 
+### Container naming
+
+Default name when `--workspace` is given: `<dirname>-<8char-hash>` (e.g., `myapp-a3f2b1c0`). The hash is derived from the full workspace path, so two workspaces named `foo` in different directories get different container names. Without `--workspace`, defaults to `<user>-dev`.
+
 ## File Layout
 
 ```
-~/.config/systemd/user/<name>.service[, <name>-sshd.service]
-~/.local/state/devctk/<name>.json, <name>-container.sh, <name>-bootstrap.sh[, <name>-sshd.sh]
+~/.local/state/devctk/<name>.json              # metadata (always)
+~/.local/state/devctk/<name>-bootstrap.sh      # bootstrap script (always)
+~/.local/state/devctk/<name>-container.sh      # container helper (systemd only)
+~/.config/systemd/user/<name>.service          # container unit (systemd only)
+~/.local/state/devctk/<name>-sshd.sh           # sshd helper (systemd + ssh only)
+~/.config/systemd/user/<name>-sshd.service     # sshd unit (systemd + ssh only)
 ```
 
 ## Supported Images
 
-Debian/Ubuntu (apt) and Alpine (apk). Other images work if sshd + sudo are pre-installed.
+Debian/Ubuntu (apt) and Alpine (apk). Other images work if sudo + bash are pre-installed.
 
 ## Constraints
 
 - Rootless only (no root)
 - SSH bound to 127.0.0.1 (when enabled)
 - Container user is always the host user (same name, UID, GID)
-- One-shot CLI; systemd handles lifecycle
+- Bootstrap runs via `podman exec --user root` (works with `--userns keep-id`)

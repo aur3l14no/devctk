@@ -40,6 +40,10 @@ def build_parser() -> argparse.ArgumentParser:
     p_init.add_argument("--mirror", action="store_true",
                         help="Mount workspace at same absolute path as host")
 
+    # Lifecycle
+    p_init.add_argument("--systemd", action="store_true",
+                        help="Manage via systemd user units (auto-start on boot)")
+
     # Extra podman flags
     p_init.add_argument("--mount", action="append", default=[])
     p_init.add_argument("--device", action="append", default=[])

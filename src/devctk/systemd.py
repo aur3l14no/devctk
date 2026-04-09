@@ -17,6 +17,7 @@ Restart=on-failure
 RestartSec=5
 ExecStartPre=$container_helper create
 ExecStart=$container_helper start
+ExecStartPost=$bootstrap_helper
 ExecStop=$container_helper stop
 
 [Install]

@@ -61,7 +61,16 @@ def cmd_init(args: argparse.Namespace, passthrough: list[str]) -> int:
     from devctk.cli import NAME_RE
 
     user = os.environ.get("USER") or pathlib.Path.home().name
-    container_name = args.container_name or f"{user}-dev"
+    # Default name: workspace-slug if given, else $USER-dev
+    if args.container_name:
+        container_name = args.container_name
+    elif args.workspace:
+        import hashlib
+        ws = str(pathlib.Path(args.workspace).expanduser().resolve())
+        slug = hashlib.sha256(ws.encode()).hexdigest()[:8]
+        container_name = f"{pathlib.Path(ws).name}-{slug}"
+    else:
+        container_name = f"{user}-dev"
     container_home = f"/home/{user}"
     uid = os.getuid()
     gid = os.getgid()
@@ -91,13 +100,21 @@ def cmd_init(args: argparse.Namespace, passthrough: list[str]) -> int:
     if workspace_mount:
         container_mounts.append(workspace_mount)
 
-    # Nix
+    # Nix + mise
     nix_profile_content = ""
+    container_env: list[str] = []
     if args.nix:
-        from devctk.nix import nix_mounts, nix_profile_script
+        from devctk.nix import nix_mounts, nix_path_entries, nix_profile_script
+        from devctk.nix import mise_mounts, mise_path_entries
         for host, target, mode in nix_mounts(user):
             container_mounts.append(f"type=bind,src={host},target={target},{mode}")
+        for host, target, mode in mise_mounts():
+            container_mounts.append(f"type=bind,src={host},target={target},{mode}")
         nix_profile_content = nix_profile_script(user)
+        # PATH for podman exec sessions (not just SSH login shells)
+        path_parts = nix_path_entries(user) + mise_path_entries()
+        path_parts += ["/usr/local/bin", "/usr/bin", "/bin", "/usr/sbin", "/sbin"]
+        container_env.append(f"PATH={':'.join(path_parts)}")
 
     # Agent config dirs
     if args.agent:
@@ -110,87 +127,45 @@ def cmd_init(args: argparse.Namespace, passthrough: list[str]) -> int:
 
     # --- Binaries ---
     podman = require_binary("podman")
-    systemctl = require_binary("systemctl")
-    loginctl = require_binary("loginctl")
 
     # --- Conflict checks ---
     if run([podman, "container", "exists", container_name], check=False).returncode == 0:
         raise SystemExit(f"container already exists: {container_name}")
 
     paths = managed_paths(container_name)
-    managed = [paths.container_unit, paths.container_helper, paths.bootstrap_helper, paths.metadata]
-    if args.ssh:
-        managed.extend([paths.sshd_unit, paths.sshd_helper])
-    for p in managed:
+    managed_files = [paths.bootstrap_helper, paths.metadata]
+    if args.systemd:
+        managed_files.extend([paths.container_unit, paths.container_helper])
+        if args.ssh:
+            managed_files.extend([paths.sshd_unit, paths.sshd_helper])
+    for p in managed_files:
         if p.exists():
             raise SystemExit(f"managed files already exist for {container_name}")
 
-    # --- Write bootstrap script (container entrypoint) ---
+    # --- Write bootstrap script ---
     write_text(
         paths.bootstrap_helper,
         render_bootstrap(
+            podman=podman,
+            name=container_name,
             user=user,
             uid=uid,
             gid=gid,
             home=container_home,
             ssh=args.ssh,
             nix_profile=nix_profile_content,
-            authorized_keys_file="/tmp/devctk-authorized-keys" if ak_file else None,
+            authorized_keys_file=str(ak_file) if ak_file else None,
             authorized_keys_text=ak_text,
-        ),
-        0o755,
-    )
-
-    # --- Internal mounts (bootstrap script + optional authorized-keys file) ---
-    internal_mounts = [
-        f"type=bind,src={paths.bootstrap_helper},target=/devctk-bootstrap.sh,ro",
-    ]
-    if ak_file:
-        internal_mounts.append(f"type=bind,src={ak_file},target=/tmp/devctk-authorized-keys,ro")
-
-    all_mounts = internal_mounts + container_mounts
-
-    # --- Write container helper ---
-    write_text(
-        paths.container_helper,
-        render_container_helper(
-            podman=podman,
-            name=container_name,
-            image=args.image,
-            mounts=all_mounts,
-            devices=args.device,
-            extra=passthrough,
-            ssh_port=args.port if args.ssh else None,
         ),
         stat.S_IRWXU,
     )
 
-    # --- Write container unit ---
-    write_text(
-        paths.container_unit,
-        render_unit(
-            "container",
-            container_name=container_name,
-            container_helper=str(paths.container_helper),
-        ),
-    )
-
-    # --- SSH-specific files ---
-    if args.ssh:
-        write_text(
-            paths.sshd_helper,
-            render_sshd_helper(podman=podman, name=container_name),
-            stat.S_IRWXU,
-        )
-        write_text(
-            paths.sshd_unit,
-            render_unit(
-                "sshd",
-                container_name=container_name,
-                container_unit=paths.container_unit.name,
-                sshd_helper=str(paths.sshd_helper),
-            ),
-        )
+    if args.systemd:
+        _init_systemd(args, podman, container_name, container_mounts, container_env,
+                       passthrough, paths, user)
+    else:
+        _init_inline(args, podman, container_name, container_mounts, container_env,
+                      passthrough, paths, user)
 
     # --- Metadata ---
     write_text(paths.metadata, json.dumps({
@@ -203,9 +178,59 @@ def cmd_init(args: argparse.Namespace, passthrough: list[str]) -> int:
         "mirror": args.mirror,
         "nix": args.nix,
         "agents": args.agent,
+        "systemd": args.systemd,
     }, indent=2, sort_keys=True) + "\n")
 
-    # --- Enable and start ---
+    # --- Success ---
+    print(f"started {container_name}")
+    if args.ssh:
+        print(f"  ssh {user}@localhost -p {args.port}")
+    print(f"  podman exec -it {container_name} bash")
+
+    return 0
+
+
+def _init_systemd(args, podman, container_name, container_mounts, container_env,
+                   passthrough, paths, user):
+    """Systemd-managed mode: write helpers + units, enable and start."""
+    from devctk.helpers import render_container_helper, render_sshd_helper
+
+    systemctl = require_binary("systemctl")
+    loginctl = require_binary("loginctl")
+
+    write_text(
+        paths.container_helper,
+        render_container_helper(
+            podman=podman, name=container_name, image=args.image,
+            mounts=container_mounts, devices=args.device, extra=passthrough,
+            env=container_env, ssh_port=args.port if args.ssh else None,
+        ),
+        stat.S_IRWXU,
+    )
+    write_text(
+        paths.container_unit,
+        render_unit("container",
+            container_name=container_name,
+            container_helper=str(paths.container_helper),
+            bootstrap_helper=str(paths.bootstrap_helper),
+        ),
+    )
+
+    if args.ssh:
+        write_text(
+            paths.sshd_helper,
+            render_sshd_helper(podman=podman, name=container_name),
+            stat.S_IRWXU,
+        )
+        write_text(
+            paths.sshd_unit,
+            render_unit("sshd",
+                container_name=container_name,
+                container_unit=paths.container_unit.name,
+                sshd_helper=str(paths.sshd_helper),
+            ),
+        )
+
     try:
         run([systemctl, "--user", "daemon-reload"])
         run([systemctl, "--user", "enable", "--now", paths.container_unit.name])
@@ -216,18 +241,32 @@ def cmd_init(args: argparse.Namespace, passthrough: list[str]) -> int:
         _cleanup(podman, systemctl, paths, container_name)
         raise
 
-    # --- Success ---
-    print(f"started {container_name}")
-    if args.ssh:
-        print(f"  ssh {user}@localhost -p {args.port}")
-    print(f"  podman exec -it {container_name} bash")
-
-    # Linger check
     res = run([loginctl, "show-user", user, "-p", "Linger"], check=False, capture=True)
     if res.returncode == 0 and res.stdout.strip().endswith("no"):
         print(f"  hint: sudo loginctl enable-linger {user}", file=sys.stderr)
 
-    return 0
+
+def _init_inline(args, podman, container_name, container_mounts, container_env,
+                  passthrough, paths, user):
+    """Inline mode: create, start, bootstrap directly — no systemd."""
+    from devctk.helpers import build_create_cmd
+
+    create_cmd = build_create_cmd(
+        podman=podman, name=container_name, image=args.image,
+        mounts=container_mounts, devices=args.device, extra=passthrough,
+        env=container_env, ssh_port=args.port if args.ssh else None,
+    )
+
+    try:
+        run(create_cmd)
+        run([podman, "start", container_name])
+        run([str(paths.bootstrap_helper)])
+    except Exception:
+        print(f"startup failed, cleaning up {container_name}", file=sys.stderr)
+        run([podman, "rm", "-f", "--ignore", container_name], check=False, capture=True)
+        for p in [paths.bootstrap_helper, paths.metadata]:
+            unlink_if_exists(p)
+        raise
 
 
 # ---------------------------------------------------------------------------

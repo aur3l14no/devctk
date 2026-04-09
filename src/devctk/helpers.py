@@ -1,4 +1,4 @@
-"""Generate shell scripts: bootstrap (container entrypoint), container helper, sshd helper."""
+"""Generate shell scripts: bootstrap (host-side ExecStartPost), container helper, sshd helper."""
 
 from __future__ import annotations
 
@@ -14,10 +14,12 @@ def _shell_join(parts: list[str]) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Bootstrap — runs as container entrypoint, execs sleep infinity at the end
+# Bootstrap — runs on the HOST as ExecStartPost, uses podman exec --user root
 # ---------------------------------------------------------------------------
 
 def render_bootstrap(
+    podman: str,
+    name: str,
     user: str,
     uid: int,
     gid: int,
@@ -27,69 +29,76 @@ def render_bootstrap(
     authorized_keys_file: str | None,
     authorized_keys_text: str | None,
 ) -> str:
-    """Render the bootstrap script that runs as the container's entrypoint.
+    """Render the bootstrap script (runs on the host via ExecStartPost).
 
-    This script is idempotent and runs on every container start.  It sets up
-    the user, sudo, optionally installs sshd, writes nix profile.d, copies
-    authorized keys, then execs ``sleep infinity``.
+    Uses ``podman exec --user root`` so it has root inside the container
+    regardless of ``--userns keep-id``.  Idempotent.
+
+    The script sets PATH from the podman binary's directory because NixOS
+    systemd user services have a minimal PATH that excludes coreutils.
     """
+    import os
+    podman_dir = os.path.dirname(podman)
     ak_path = f"/etc/ssh/authorized_keys/{user}"
     sudoers = f"/etc/sudoers.d/90-{user}"
 
-    # Build the copy-keys snippet (only used if ssh=True).
-    copy_keys = ""
+    # Build the copy-keys snippet (runs on host, pipes into container).
+    copy_keys_block = ""
     if ssh:
         if authorized_keys_file is not None:
-            copy_keys = f"cat {_sq(authorized_keys_file)} >{_sq(ak_path)}"
+            copy_keys_block = (
+                f'\n# Copy authorized keys from host\n'
+                f'"$podman" exec --user root -i "$name" /bin/sh -c {_sq("cat >" + ak_path)}'
+                f' < {_sq(authorized_keys_file)}\n'
+                f'exec_root {_sq(f"chmod 644 {ak_path} && chown root:root {ak_path}")}\n'
+            )
         elif authorized_keys_text is not None:
-            copy_keys = f"printf '%s\\n' {_sq(authorized_keys_text)} >{_sq(ak_path)}"
+            copy_keys_block = (
+                f'\n# Copy authorized keys (inline)\n'
+                f'printf \'%s\\n\' {_sq(authorized_keys_text)} | '
+                f'"$podman" exec --user root -i "$name" /bin/sh -c {_sq("cat >" + ak_path)}\n'
+                f'exec_root {_sq(f"chmod 644 {ak_path} && chown root:root {ak_path}")}\n'
+            )
 
-    # Build the nix profile.d block.
-    nix_block = ""
+    # Nix profile.d block (inside the heredoc)
+    nix_heredoc = ""
     if nix_profile:
-        # Escape the profile content for embedding in a heredoc.
-        nix_block = f"""\
-# Nix PATH for interactive shells
-mkdir -p /etc/profile.d
-cat >/etc/profile.d/99-devctk-nix.sh <<'__DEVCTK_NIX__'
-{nix_profile}__DEVCTK_NIX__
+        nix_heredoc = f"""
+    # Nix PATH for interactive shells
+    mkdir -p /etc/profile.d
+    cat >/etc/profile.d/99-devctk-nix.sh <<'__NIX__'
+{nix_profile}__NIX__
 """
 
-    # SSH setup block.
-    ssh_block = ""
+    # SSH setup block (inside the heredoc)
+    ssh_heredoc = ""
     if ssh:
-        ssh_block = f"""\
-# --- SSH ---
-need_sshd=false
-test -x /usr/sbin/sshd || need_sshd=true
+        ssh_heredoc = f"""
+    # --- SSH ---
+    need_sshd=false
+    test -x /usr/sbin/sshd || need_sshd=true
 
-if $need_sshd; then
-    case "$pm" in
-        apt)
-            export DEBIAN_FRONTEND=noninteractive
-            apt-get update -qq && apt-get install -y --no-install-recommends openssh-server
-            ;;
-        apk)
-            apk add --no-cache openssh
-            ;;
-        *)
-            echo "sshd missing and no supported package manager" >&2
-            exit 1
-            ;;
-    esac
-fi
+    if $need_sshd; then
+        case "$pm" in
+            apt)
+                export DEBIAN_FRONTEND=noninteractive
+                apt-get update -qq && apt-get install -y --no-install-recommends openssh-server
+                ;;
+            apk)
+                apk add --no-cache openssh
+                ;;
+            *)
+                echo "sshd missing and no supported package manager" >&2
+                exit 1
+                ;;
+        esac
+    fi
 
-mkdir -p /run/sshd /etc/ssh/authorized_keys /etc/ssh/sshd_config.d
-chmod 755 /etc/ssh/authorized_keys
-ssh-keygen -A 2>/dev/null
+    mkdir -p /run/sshd /etc/ssh/authorized_keys /etc/ssh/sshd_config.d
+    chmod 755 /etc/ssh/authorized_keys
+    ssh-keygen -A 2>/dev/null
 
-# Authorized keys
-{copy_keys}
-chmod 644 {_sq(ak_path)}
-chown root:root {_sq(ak_path)}
-
-# sshd config
-cat >/etc/ssh/sshd_config.d/10-rootless-dev.conf <<'__DEVCTK_SSHD__'
+    cat >/etc/ssh/sshd_config.d/10-rootless-dev.conf <<'__SSHD__'
 PermitRootLogin no
 PasswordAuthentication no
 KbdInteractiveAuthentication no
@@ -98,23 +107,48 @@ PubkeyAuthentication yes
 AuthorizedKeysFile /etc/ssh/authorized_keys/%u
 AllowUsers {user}
 PidFile /run/sshd.pid
-__DEVCTK_SSHD__
+__SSHD__
 
-/usr/sbin/sshd -t
+    /usr/sbin/sshd -t
 """
 
     return f"""\
 #!/bin/sh
 set -eu
 
-# --- Detect package manager ---
+# NixOS systemd user services have a minimal PATH — add podman's dir
+export PATH={_sq(podman_dir)}:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:${{PATH:-}}
+
+podman={_sq(podman)}
+name={_sq(name)}
+
+exec_root() {{
+    "$podman" exec --user root "$name" /bin/sh -c "$@"
+}}
+
+# Wait for container to be ready
+n=0
+while ! "$podman" exec "$name" true >/dev/null 2>&1; do
+    n=$((n + 1))
+    if [ "$n" -ge 60 ]; then
+        echo "container $name not ready after 60s" >&2
+        exit 1
+    fi
+    sleep 1
+done
+
+# Run setup inside the container as root via heredoc
+"$podman" exec --user root -i "$name" /bin/sh <<'__DEVCTK_BOOTSTRAP__'
+set -eu
+
+# Detect package manager
 pm=none
 command -v apt-get >/dev/null 2>&1 && pm=apt
 if [ "$pm" = "none" ]; then
     command -v apk >/dev/null 2>&1 && pm=apk
 fi
 
-# --- Install sudo if missing ---
+# Install sudo if missing
 if ! command -v sudo >/dev/null 2>&1; then
     case "$pm" in
         apt)
@@ -131,7 +165,7 @@ if ! command -v sudo >/dev/null 2>&1; then
     esac
 fi
 
-# Install bash if missing (for user shell)
+# Install bash if missing
 if ! command -v bash >/dev/null 2>&1; then
     case "$pm" in
         apk) apk add --no-cache bash ;;
@@ -139,14 +173,17 @@ if ! command -v bash >/dev/null 2>&1; then
     esac
 fi
 
-# --- User setup ---
+# User setup
 container_user={_sq(user)}
 container_uid={uid}
 container_gid={gid}
 container_home={_sq(home)}
 
-shell=/bin/bash
-command -v bash >/dev/null 2>&1 || shell=/bin/sh
+shell=$(command -v bash 2>/dev/null || echo /bin/sh)
+
+# Ensure log files exist (shadow tools fail without them in rootless containers)
+mkdir -p /var/log
+touch /var/log/faillog /var/log/lastlog 2>/dev/null || true
 
 # Handle GID
 existing_group=$(getent group "$container_gid" 2>/dev/null | cut -d: -f1 || true)
@@ -176,16 +213,49 @@ chown "$container_uid:$container_gid" "$container_home" 2>/dev/null || true
 # Passwordless sudo
 printf '%s ALL=(ALL) NOPASSWD:ALL\\n' "$container_user" >{sudoers}
 chmod 440 {sudoers}
-
-{nix_block}{ssh_block}# Ready
+{nix_heredoc}{ssh_heredoc}
+# Signal readiness
 touch /run/devctk-ready
-exec sleep infinity
+__DEVCTK_BOOTSTRAP__
+{copy_keys_block}
+echo "bootstrap complete for $name"
 """
 
 
 # ---------------------------------------------------------------------------
-# Container helper — create / start / stop
+# Container helper — create / start / stop (entrypoint is sleep infinity)
 # ---------------------------------------------------------------------------
+
+def build_create_cmd(
+    podman: str,
+    name: str,
+    image: str,
+    mounts: list[str],
+    devices: list[str],
+    extra: list[str],
+    env: list[str] | None = None,
+    ssh_port: int | None = None,
+) -> list[str]:
+    """Build the podman create command list."""
+    cmd = [
+        podman, "create",
+        "--name", name,
+        "--userns", "keep-id",
+        "--init",
+        "--stop-timeout", "5",
+    ]
+    for e in env or []:
+        cmd.extend(["-e", e])
+    for d in devices:
+        cmd.extend(["--device", d])
+    for m in mounts:
+        cmd.extend(["--mount", m])
+    if ssh_port is not None:
+        cmd.extend(["--publish", f"127.0.0.1:{ssh_port}:22"])
+    cmd.extend(extra)
+    cmd.extend([image, "sleep", "infinity"])
+    return cmd
+
 
 def render_container_helper(
     podman: str,
@@ -194,29 +264,10 @@ def render_container_helper(
     mounts: list[str],
     devices: list[str],
     extra: list[str],
+    env: list[str] | None = None,
     ssh_port: int | None = None,
 ) -> str:
-    """Render the container helper script (create/start/stop).
-
-    The container's entrypoint is /devctk-bootstrap.sh (bind-mounted from
-    the host state dir).  The bootstrap script execs ``sleep infinity``
-    after setup.
-    """
-    create_cmd = [
-        podman, "create",
-        "--name", name,
-        "--userns", "keep-id",
-        "--init",
-        "--stop-timeout", "5",
-    ]
-    for d in devices:
-        create_cmd.extend(["--device", d])
-    for m in mounts:
-        create_cmd.extend(["--mount", m])
-    if ssh_port is not None:
-        create_cmd.extend(["--publish", f"127.0.0.1:{ssh_port}:22"])
-    create_cmd.extend(extra)
-    create_cmd.extend([image, "/devctk-bootstrap.sh"])
+    create_cmd = build_create_cmd(podman, name, image, mounts, devices, extra, env, ssh_port)
 
     return f"""\
 #!/bin/sh
@@ -248,15 +299,10 @@ esac
 
 
 # ---------------------------------------------------------------------------
-# SSHD helper — start / stop only (bootstrap is handled by container entrypoint)
+# SSHD helper — start / stop only
 # ---------------------------------------------------------------------------
 
 def render_sshd_helper(podman: str, name: str) -> str:
-    """Render the sshd helper script (start/stop).
-
-    Waits for the bootstrap to signal readiness via /run/devctk-ready
-    before starting sshd.
-    """
     return f"""\
 #!/bin/sh
 set -eu

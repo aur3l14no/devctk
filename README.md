@@ -10,7 +10,7 @@ pip install devctk
 uvx devctk --help
 ```
 
-Requires: Linux, Podman (rootless), systemd. Python 3.11+.
+Requires: Linux, Podman (rootless). Python 3.11+. systemd optional (for auto-start).
 
 ## Usage
 
@@ -21,21 +21,21 @@ devctk init --image ubuntu:24.04
 podman exec -it $USER-dev bash
 ```
 
-### SSH-accessible container (remote server)
+### SSH-accessible persistent container (remote server)
 
 ```sh
 devctk init --image ubuntu:24.04 \
-  --ssh --authorized-keys-file ~/.ssh/authorized_keys --port 39000
+  --systemd --ssh --authorized-keys-file ~/.ssh/authorized_keys --port 39000
 ssh $USER@localhost -p 39000
 ```
 
-### With Nix tools from the host
+### With Nix tools + mise from the host
 
 ```sh
 devctk init --image alpine:latest --nix
 ```
 
-Mounts `/nix/store` and your user profile read-only. All your Nix-installed tools are available inside the container without rebuilding the image.
+Mounts `/nix/store`, user profile, and `~/.local/share/mise/installs` read-only. All your Nix-installed and mise-managed tools are available inside the container without rebuilding the image.
 
 ### With AI agent configs
 
@@ -57,7 +57,7 @@ Workspace is mounted at the same absolute path inside the container. Agent sessi
 
 ```sh
 devctk init --image ubuntu:24.04 \
-  --ssh --authorized-keys-file ~/.ssh/authorized_keys \
+  --systemd --ssh --authorized-keys-file ~/.ssh/authorized_keys \
   --nix --agent claude --mirror --workspace ~/projects/myapp
 ```
 
@@ -73,20 +73,23 @@ devctk rm --all    # remove all
 
 - Rootless Podman container with `--userns keep-id` (your UID inside = your UID outside)
 - Passwordless sudo
-- Auto-start on boot via systemd user units (with `loginctl enable-linger`)
-- Workspace bind-mounted (default `~/devctk/<name>` on host, `/home/<you>/workspace` in container)
+- Workspace bind-mounted (default: `~/devctk/<name>` on host → `/home/$USER/workspace` in container; with `--mirror`: same absolute path on both sides)
 - Debian/Ubuntu and Alpine images supported out of the box
+- With `--systemd`: auto-start on boot via systemd user units (requires `loginctl enable-linger`)
+- With `--nix`: host Nix store + mise tools forwarded into container, PATH set automatically
+- With `--agent`: agent config dirs mounted for session continuity
 
 ## Flags
 
 | Flag | Description |
 |---|---|
 | `--image IMAGE` | Base image (required) |
-| `--name NAME` | Container name (default: `<user>-dev`) |
+| `--name NAME` | Container name (default: `<workspace>-<slug>` or `<user>-dev`) |
+| `--systemd` | Manage via systemd user units (auto-start on boot) |
 | `--ssh` | Enable SSH access |
 | `--authorized-keys[-file]` | SSH public keys (required with `--ssh`) |
 | `--port PORT` | SSH port (default: 39000) |
-| `--nix` | Mount Nix store + profiles, set PATH |
+| `--nix` | Mount Nix store + profiles + mise tools, set PATH |
 | `--agent claude\|codex` | Mount agent config dirs (repeatable) |
 | `--mirror` | Workspace at same absolute path as host |
 | `--workspace PATH` | Override workspace directory |
