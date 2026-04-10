@@ -29,13 +29,13 @@ devctk init --image ubuntu:24.04 \
 ssh $USER@localhost -p 39000
 ```
 
-### With Nix tools + mise from the host
+### With Nix tools from the host
 
 ```sh
-devctk init --image alpine:latest --nix
+devctk init --image alpine:latest --nix --mise
 ```
 
-Mounts `/nix/store`, user profile, and `~/.local/share/mise/installs` read-only. All your Nix-installed and mise-managed tools are available inside the container without rebuilding the image.
+`--nix` mounts `/nix/store` and your user profile read-only. `--mise` mounts `~/.local/share/mise/installs`. Both set PATH so tools are available inside the container without rebuilding the image. Either flag works independently.
 
 ### With AI agent configs
 
@@ -76,7 +76,7 @@ devctk rm --all    # remove all
 - Workspace bind-mounted (default: `~/devctk/<name>` on host → `/home/$USER/workspace` in container; with `--mirror`: same absolute path on both sides)
 - Debian/Ubuntu and Alpine images supported out of the box
 - With `--systemd`: auto-start on boot via systemd user units (requires `loginctl enable-linger`)
-- With `--nix`: host Nix store + mise tools forwarded into container, PATH set automatically
+- With `--nix`/`--mise`: host Nix store and/or mise tools forwarded into container, PATH set automatically
 - With `--agent`: agent config dirs mounted for session continuity
 
 ## Flags
@@ -89,7 +89,8 @@ devctk rm --all    # remove all
 | `--ssh` | Enable SSH access |
 | `--authorized-keys[-file]` | SSH public keys (required with `--ssh`) |
 | `--port PORT` | SSH port (default: 39000) |
-| `--nix` | Mount Nix store + profiles + mise tools, set PATH |
+| `--nix` | Mount Nix store + profiles, set PATH |
+| `--mise` | Mount mise tool installs, set PATH |
 | `--agent claude\|codex` | Mount agent config dirs (repeatable) |
 | `--mirror` | Workspace at same absolute path as host |
 | `--workspace PATH` | Override workspace directory |

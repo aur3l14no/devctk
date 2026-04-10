@@ -11,7 +11,9 @@ import stat
 import sys
 
 from devctk.paths import ManagedPaths, managed_paths, state_root, STATE_DIR_NAME
-from devctk.helpers import render_bootstrap, render_container_helper, render_sshd_helper
+from devctk.helpers import (
+    build_create_cmd, render_bootstrap, render_container_helper, render_sshd_helper,
+)
 from devctk.systemd import render_unit
 from devctk.util import require_binary, run, write_text, unlink_if_exists
 
@@ -203,7 +205,6 @@ def cmd_init(args: argparse.Namespace, passthrough: list[str]) -> int:
 def _init_systemd(args, podman, container_name, container_mounts, container_env,
                    passthrough, paths, user):
     """Systemd-managed mode: write helpers + units, enable and start."""
-    from devctk.helpers import render_container_helper, render_sshd_helper
 
     systemctl = require_binary("systemctl")
     loginctl = require_binary("loginctl")
@@ -259,7 +260,6 @@ def _init_systemd(args, podman, container_name, container_mounts, container_env,
 def _init_inline(args, podman, container_name, container_mounts, container_env,
                   passthrough, paths, user):
     """Inline mode: create, start, bootstrap directly — no systemd."""
-    from devctk.helpers import build_create_cmd
 
     create_cmd = build_create_cmd(
         podman=podman, name=container_name, image=args.image,

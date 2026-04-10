@@ -28,7 +28,8 @@ Podman (rootless). systemd optional (for `--systemd` mode).
 - `--systemd` — manage via systemd user units (auto-start on boot)
 - `--ssh` — enable SSH access (requires `--authorized-keys` or `--authorized-keys-file`)
 - `--port` (default 39000, requires `--ssh`)
-- `--nix` — mount Nix store + profiles + mise tools, set PATH
+- `--nix` — mount Nix store + profiles, set PATH
+- `--mise` — mount mise tool installs, set PATH
 - `--agent claude|codex` (repeatable) — mount agent config dirs
 - `--mirror` — workspace at same absolute path as host
 - `--workspace PATH` (default `~/devctk/<name>`)

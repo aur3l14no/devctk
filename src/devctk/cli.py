@@ -2,11 +2,7 @@ from __future__ import annotations
 
 import argparse
 import os
-import re
 import sys
-
-NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
-COMMANDS = {"init", "ls", "rm"}
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -45,7 +41,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_init.add_argument("--systemd", action="store_true",
                         help="Manage via systemd user units (auto-start on boot)")
 
-    # Extra podman flags
+    # Extra podman flags (everything after --)
     p_init.add_argument("--mount", action="append", default=[])
     p_init.add_argument("--device", action="append", default=[])
 
@@ -60,35 +56,12 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def normalize_argv(argv: list[str]) -> list[str]:
-    """Treat bare args (no subcommand) as ``init``."""
-    if not argv:
-        return argv
-    if argv[0] in COMMANDS or argv[0] in {"-h", "--help"}:
-        return argv
-    return ["init", *argv]
-
-
-def split_passthrough(argv: list[str]) -> tuple[list[str], list[str]]:
+def _split_passthrough(argv: list[str]) -> tuple[list[str], list[str]]:
+    """Split argv at ``--`` into our args and podman passthrough."""
     if "--" not in argv:
         return argv, []
     idx = argv.index("--")
     return argv[:idx], argv[idx + 1 :]
-
-
-BANNED_PASSTHROUGH = {
-    "--mount", "--volume", "--publish", "--name", "--device", "--user",
-    "--userns", "--restart", "--rm", "--replace", "--entrypoint",
-    "--init", "--stop-timeout",
-}
-
-
-def validate_passthrough(args: list[str]) -> None:
-    for tok in args:
-        if tok in BANNED_PASSTHROUGH or any(tok.startswith(f + "=") for f in BANNED_PASSTHROUGH):
-            raise SystemExit(f"unsupported passthrough flag: {tok}")
-        if tok.startswith(("-p", "-v", "-u")):
-            raise SystemExit(f"unsupported passthrough flag: {tok}")
 
 
 def main() -> int:
@@ -97,21 +70,17 @@ def main() -> int:
     if os.geteuid() == 0:
         raise SystemExit("refuse to run as root")
 
-    argv = normalize_argv(sys.argv[1:])
-    ours, passthrough = split_passthrough(argv)
+    ours, passthrough = _split_passthrough(sys.argv[1:])
     parser = build_parser()
     args = parser.parse_args(ours)
 
     if args.command == "init":
-        validate_passthrough(passthrough)
-
         # SSH flag dependencies
         if args.ssh:
             if not args.authorized_keys_text and not args.authorized_keys_file:
                 raise SystemExit("--ssh requires --authorized-keys or --authorized-keys-file")
-        else:
-            if args.authorized_keys_text or args.authorized_keys_file:
-                raise SystemExit("--authorized-keys requires --ssh")
+        elif args.authorized_keys_text or args.authorized_keys_file:
+            raise SystemExit("--authorized-keys requires --ssh")
 
         # Workspace conflicts
         if args.no_workspace and args.workspace:
