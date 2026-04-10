@@ -6,6 +6,7 @@ import argparse
 import json
 import os
 import pathlib
+import re
 import stat
 import sys
 
@@ -13,6 +14,8 @@ from devctk.paths import ManagedPaths, managed_paths, state_root, STATE_DIR_NAME
 from devctk.helpers import render_bootstrap, render_container_helper, render_sshd_helper
 from devctk.systemd import render_unit
 from devctk.util import require_binary, run, write_text, unlink_if_exists
+
+NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
 
 
 # ---------------------------------------------------------------------------
@@ -58,8 +61,6 @@ def build_workspace_mount(
 
 
 def cmd_init(args: argparse.Namespace, passthrough: list[str]) -> int:
-    from devctk.cli import NAME_RE
-
     user = os.environ.get("USER") or pathlib.Path.home().name
     # Default name: workspace-slug if given, else $USER-dev
     if args.container_name:
@@ -106,21 +107,24 @@ def cmd_init(args: argparse.Namespace, passthrough: list[str]) -> int:
     path_parts: list[str] = []
     if args.nix:
         from devctk.nix import nix_mounts, nix_path_entries
-        for host, target, mode in nix_mounts(user):
+        nm = nix_mounts(user)
+        if not nm:
+            print("warning: --nix specified but no Nix installation found", file=sys.stderr)
+        for host, target, mode in nm:
             container_mounts.append(f"type=bind,src={host},target={target},{mode}")
         path_parts.extend(nix_path_entries(user))
     if args.mise:
-        from devctk.nix import mise_mounts, mise_path_entries
+        from devctk.mise import mise_mounts, mise_path_entries
         for host, target, mode in mise_mounts():
             container_mounts.append(f"type=bind,src={host},target={target},{mode}")
         path_parts.extend(mise_path_entries())
     if path_parts:
-        path_parts += ["/usr/local/bin", "/usr/bin", "/bin", "/usr/sbin", "/sbin"]
-        container_env.append(f"PATH={':'.join(path_parts)}")
-        # profile.d script for SSH login shells
-        path_prepend = ":".join(p for p in path_parts if p.startswith(("/nix/", "/etc/profiles/", "/run/current-system/")) or "mise" in p)
-        if path_prepend:
-            nix_profile_content = f'export PATH="{path_prepend}:$PATH"\n'
+        # profile.d script for SSH login shells (nix/mise + sbin dirs that some distros drop for non-root)
+        profile_parts = path_parts + ["/usr/local/sbin", "/usr/sbin", "/sbin"]
+        nix_profile_content = f'export PATH="{":".join(profile_parts)}:$PATH"\n'
+        # Full PATH for podman exec sessions (includes system paths)
+        full_path = path_parts + ["/usr/local/bin", "/usr/bin", "/bin", "/usr/sbin", "/sbin"]
+        container_env.append(f"PATH={':'.join(full_path)}")
 
     # Agent config dirs
     if args.agent:
@@ -244,7 +248,7 @@ def _init_systemd(args, podman, container_name, container_mounts, container_env,
             run([systemctl, "--user", "enable", "--now", paths.sshd_unit.name])
     except Exception:
         print(f"startup failed, cleaning up {container_name}", file=sys.stderr)
-        _cleanup(podman, systemctl, paths, container_name)
+        _cleanup(podman, paths, container_name)
         raise
 
     res = run([loginctl, "show-user", user, "-p", "Linger"], check=False, capture=True)
@@ -327,7 +331,6 @@ def cmd_rm(args: argparse.Namespace) -> int:
         names = [args.container_name or f"{user}-dev"]
 
     podman = require_binary("podman")
-    systemctl = require_binary("systemctl")
 
     for name in names:
         paths = managed_paths(name)
@@ -343,7 +346,7 @@ def cmd_rm(args: argparse.Namespace) -> int:
                 continue
             raise SystemExit(f"not found: {name}")
 
-        _cleanup(podman, systemctl, paths, name)
+        _cleanup(podman, paths, name)
         print(f"removed {name}")
 
     return 0
@@ -353,10 +356,17 @@ def cmd_rm(args: argparse.Namespace) -> int:
 # helpers
 # ---------------------------------------------------------------------------
 
-def _cleanup(podman: str, systemctl: str, paths: ManagedPaths, name: str) -> None:
+def _cleanup(podman: str, paths: ManagedPaths, name: str) -> None:
     """Stop services, remove container, delete managed files."""
-    run([systemctl, "--user", "disable", "--now", paths.sshd_unit.name], check=False, capture=True)
-    run([systemctl, "--user", "disable", "--now", paths.container_unit.name], check=False, capture=True)
+    # Disable systemd units if they exist (no-op if inline mode)
+    has_units = paths.container_unit.exists() or paths.sshd_unit.exists()
+    if has_units:
+        import shutil
+        systemctl = shutil.which("systemctl")
+        if systemctl:
+            run([systemctl, "--user", "disable", "--now", paths.sshd_unit.name], check=False, capture=True)
+            run([systemctl, "--user", "disable", "--now", paths.container_unit.name], check=False, capture=True)
+
     res = run([podman, "rm", "-f", "--ignore", name], check=False, capture=True)
     if res.returncode != 0:
         print(f"warning: podman rm failed for {name}: {res.stderr.strip()}", file=sys.stderr)
@@ -368,21 +378,16 @@ def _cleanup(podman: str, systemctl: str, paths: ManagedPaths, name: str) -> Non
     if paths.helper_dir.exists() and not any(paths.helper_dir.iterdir()):
         paths.helper_dir.rmdir()
 
-    run([systemctl, "--user", "daemon-reload"], check=False)
+    if has_units and systemctl:
+        run([systemctl, "--user", "daemon-reload"], check=False)
 
 
 def list_names() -> list[str]:
+    """List managed container names. Metadata (*.json) is the authoritative source."""
     d = state_root() / STATE_DIR_NAME
     if not d.exists():
         return []
-    names: set[str] = set()
-    for p in d.glob("*.json"):
-        names.add(p.stem)
-    for p in d.glob("*-container.sh"):
-        names.add(p.name.removesuffix("-container.sh"))
-    for p in d.glob("*-bootstrap.sh"):
-        names.add(p.name.removesuffix("-bootstrap.sh"))
-    return sorted(names)
+    return sorted(p.stem for p in d.glob("*.json"))
 
 
 def _read_meta(path: pathlib.Path) -> dict:

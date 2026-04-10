@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import shlex
 
 
@@ -17,130 +18,9 @@ def _shell_join(parts: list[str]) -> str:
 # Bootstrap — runs on the HOST as ExecStartPost, uses podman exec --user root
 # ---------------------------------------------------------------------------
 
-def render_bootstrap(
-    podman: str,
-    name: str,
-    user: str,
-    uid: int,
-    gid: int,
-    home: str,
-    ssh: bool,
-    nix_profile: str,
-    authorized_keys_file: str | None,
-    authorized_keys_text: str | None,
-) -> str:
-    """Render the bootstrap script (runs on the host via ExecStartPost).
-
-    Uses ``podman exec --user root`` so it has root inside the container
-    regardless of ``--userns keep-id``.  Idempotent.
-
-    The script sets PATH from the podman binary's directory because NixOS
-    systemd user services have a minimal PATH that excludes coreutils.
-    """
-    import os
-    podman_dir = os.path.dirname(podman)
-    ak_path = f"/etc/ssh/authorized_keys/{user}"
-    sudoers = f"/etc/sudoers.d/90-{user}"
-
-    # Build the copy-keys snippet (runs on host, pipes into container).
-    copy_keys_block = ""
-    if ssh:
-        if authorized_keys_file is not None:
-            copy_keys_block = (
-                f'\n# Copy authorized keys from host\n'
-                f'"$podman" exec --user root -i "$name" /bin/sh -c {_sq("cat >" + ak_path)}'
-                f' < {_sq(authorized_keys_file)}\n'
-                f'exec_root {_sq(f"chmod 644 {ak_path} && chown root:root {ak_path}")}\n'
-            )
-        elif authorized_keys_text is not None:
-            copy_keys_block = (
-                f'\n# Copy authorized keys (inline)\n'
-                f'printf \'%s\\n\' {_sq(authorized_keys_text)} | '
-                f'"$podman" exec --user root -i "$name" /bin/sh -c {_sq("cat >" + ak_path)}\n'
-                f'exec_root {_sq(f"chmod 644 {ak_path} && chown root:root {ak_path}")}\n'
-            )
-
-    # Nix profile.d block (inside the heredoc)
-    nix_heredoc = ""
-    if nix_profile:
-        nix_heredoc = f"""
-    # Nix PATH for interactive shells
-    mkdir -p /etc/profile.d
-    cat >/etc/profile.d/99-devctk-nix.sh <<'__NIX__'
-{nix_profile}__NIX__
-"""
-
-    # SSH setup block (inside the heredoc)
-    ssh_heredoc = ""
-    if ssh:
-        ssh_heredoc = f"""
-    # --- SSH ---
-    need_sshd=false
-    test -x /usr/sbin/sshd || need_sshd=true
-
-    if $need_sshd; then
-        case "$pm" in
-            apt)
-                export DEBIAN_FRONTEND=noninteractive
-                apt-get update -qq && apt-get install -y --no-install-recommends openssh-server
-                ;;
-            apk)
-                apk add --no-cache openssh
-                ;;
-            *)
-                echo "sshd missing and no supported package manager" >&2
-                exit 1
-                ;;
-        esac
-    fi
-
-    mkdir -p /run/sshd /etc/ssh/authorized_keys /etc/ssh/sshd_config.d
-    chmod 755 /etc/ssh/authorized_keys
-    ssh-keygen -A 2>/dev/null
-
-    cat >/etc/ssh/sshd_config.d/10-rootless-dev.conf <<'__SSHD__'
-PermitRootLogin no
-PasswordAuthentication no
-KbdInteractiveAuthentication no
-ChallengeResponseAuthentication no
-PubkeyAuthentication yes
-AuthorizedKeysFile /etc/ssh/authorized_keys/%u
-AllowUsers {user}
-PidFile /run/sshd.pid
-__SSHD__
-
-    /usr/sbin/sshd -t
-"""
-
+def _bootstrap_pkg_install(user: str) -> str:
+    """Shell fragment: detect package manager, install sudo + bash if missing."""
     return f"""\
-#!/bin/sh
-set -eu
-
-# NixOS systemd user services have a minimal PATH — add podman's dir
-export PATH={_sq(podman_dir)}:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:${{PATH:-}}
-
-podman={_sq(podman)}
-name={_sq(name)}
-
-exec_root() {{
-    "$podman" exec --user root "$name" /bin/sh -c "$@"
-}}
-
-# Wait for container to be ready
-n=0
-while ! "$podman" exec "$name" true >/dev/null 2>&1; do
-    n=$((n + 1))
-    if [ "$n" -ge 60 ]; then
-        echo "container $name not ready after 60s" >&2
-        exit 1
-    fi
-    sleep 1
-done
-
-# Run setup inside the container as root via heredoc
-"$podman" exec --user root -i "$name" /bin/sh <<'__DEVCTK_BOOTSTRAP__'
-set -eu
-
 # Detect package manager
 pm=none
 command -v apt-get >/dev/null 2>&1 && pm=apt
@@ -172,7 +52,13 @@ if ! command -v bash >/dev/null 2>&1; then
         *) : ;;
     esac
 fi
+"""
 
+
+def _bootstrap_user_setup(user: str, uid: int, gid: int, home: str) -> str:
+    """Shell fragment: create user matching host UID/GID, configure sudo."""
+    sudoers = f"/etc/sudoers.d/90-{user}"
+    return f"""\
 # User setup
 container_user={_sq(user)}
 container_uid={uid}
@@ -211,13 +97,154 @@ mkdir -p "$container_home" /etc/sudoers.d
 chown "$container_uid:$container_gid" "$container_home" 2>/dev/null || true
 
 # Passwordless sudo
-printf '%s ALL=(ALL) NOPASSWD:ALL\\n' "$container_user" >{sudoers}
-chmod 440 {sudoers}
-{nix_heredoc}{ssh_heredoc}
-# Signal readiness
-touch /run/devctk-ready
+printf '%s ALL=(ALL) NOPASSWD:ALL\\n' "$container_user" >{_sq(sudoers)}
+chmod 440 {_sq(sudoers)}
+"""
+
+
+def _bootstrap_nix_profile(nix_profile: str) -> str:
+    """Shell fragment: write /etc/profile.d for nix/mise PATH."""
+    if not nix_profile:
+        return ""
+    return f"""\
+# Nix/mise PATH for interactive shells
+mkdir -p /etc/profile.d
+cat >/etc/profile.d/99-devctk-nix.sh <<'__NIX__'
+{nix_profile}__NIX__
+"""
+
+
+def _bootstrap_ssh_setup(user: str) -> str:
+    """Shell fragment: install and configure sshd."""
+    return f"""\
+# --- SSH ---
+need_sshd=false
+test -x /usr/sbin/sshd || need_sshd=true
+
+if $need_sshd; then
+    case "$pm" in
+        apt)
+            export DEBIAN_FRONTEND=noninteractive
+            apt-get update -qq && apt-get install -y --no-install-recommends openssh-server
+            ;;
+        apk)
+            apk add --no-cache openssh
+            ;;
+        *)
+            echo "sshd missing and no supported package manager" >&2
+            exit 1
+            ;;
+    esac
+fi
+
+mkdir -p /run/sshd /etc/ssh/authorized_keys /etc/ssh/sshd_config.d
+chmod 755 /etc/ssh/authorized_keys
+ssh-keygen -A 2>/dev/null
+
+cat >/etc/ssh/sshd_config.d/10-rootless-dev.conf <<'__SSHD__'
+PermitRootLogin no
+PasswordAuthentication no
+KbdInteractiveAuthentication no
+ChallengeResponseAuthentication no
+PubkeyAuthentication yes
+AuthorizedKeysFile /etc/ssh/authorized_keys/%u
+AllowUsers {user}
+PidFile /run/sshd.pid
+__SSHD__
+
+/usr/sbin/sshd -t
+"""
+
+
+def _bootstrap_copy_keys(
+    user: str,
+    authorized_keys_file: str | None,
+    authorized_keys_text: str | None,
+) -> str:
+    """Shell lines that run on the HOST (outside heredoc) to copy SSH keys."""
+    ak_path = f"/etc/ssh/authorized_keys/{user}"
+    if authorized_keys_file is not None:
+        return (
+            f'\n# Copy authorized keys from host\n'
+            f'"$podman" exec --user root -i "$name" /bin/sh -c {_sq("cat >" + ak_path)}'
+            f' < {_sq(authorized_keys_file)}\n'
+            f'exec_root {_sq(f"chmod 644 {ak_path} && chown root:root {ak_path}")}\n'
+        )
+    if authorized_keys_text is not None:
+        return (
+            f'\n# Copy authorized keys (inline)\n'
+            f'printf \'%s\\n\' {_sq(authorized_keys_text)} | '
+            f'"$podman" exec --user root -i "$name" /bin/sh -c {_sq("cat >" + ak_path)}\n'
+            f'exec_root {_sq(f"chmod 644 {ak_path} && chown root:root {ak_path}")}\n'
+        )
+    return ""
+
+
+def render_bootstrap(
+    podman: str,
+    name: str,
+    user: str,
+    uid: int,
+    gid: int,
+    home: str,
+    ssh: bool,
+    nix_profile: str,
+    authorized_keys_file: str | None,
+    authorized_keys_text: str | None,
+) -> str:
+    """Render the bootstrap script (runs on the host via ExecStartPost).
+
+    Uses ``podman exec --user root`` so it has root inside the container
+    regardless of ``--userns keep-id``.  Idempotent.
+    """
+    podman_dir = os.path.dirname(podman)
+
+    # Assemble heredoc body from sections
+    heredoc_parts = [
+        _bootstrap_pkg_install(user),
+        _bootstrap_user_setup(user, uid, gid, home),
+        _bootstrap_nix_profile(nix_profile),
+    ]
+    if ssh:
+        heredoc_parts.append(_bootstrap_ssh_setup(user))
+    heredoc_parts.append("# Signal readiness\ntouch /run/devctk-ready\n")
+    heredoc_body = "\n".join(p.rstrip() for p in heredoc_parts if p)
+
+    # Host-side key copy (runs after the heredoc)
+    copy_keys = _bootstrap_copy_keys(user, authorized_keys_file, authorized_keys_text) if ssh else ""
+
+    return f"""\
+#!/bin/sh
+set -eu
+
+# NixOS systemd user services have a minimal PATH — add podman's dir
+export PATH={_sq(podman_dir)}:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:${{PATH:-}}
+
+podman={_sq(podman)}
+name={_sq(name)}
+
+exec_root() {{
+    "$podman" exec --user root "$name" /bin/sh -c "$@"
+}}
+
+# Wait for container to be ready
+n=0
+while ! "$podman" exec "$name" true >/dev/null 2>&1; do
+    n=$((n + 1))
+    if [ "$n" -ge 60 ]; then
+        echo "container $name not ready after 60s" >&2
+        exit 1
+    fi
+    sleep 1
+done
+
+# Run setup inside the container as root via heredoc
+"$podman" exec --user root -i "$name" /bin/sh <<'__DEVCTK_BOOTSTRAP__'
+set -eu
+
+{heredoc_body}
 __DEVCTK_BOOTSTRAP__
-{copy_keys_block}
+{copy_keys}
 echo "bootstrap complete for $name"
 """
 
