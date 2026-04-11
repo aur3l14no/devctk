@@ -51,7 +51,11 @@ Mounts `~/.claude/`, `~/.claude.json`, `~/.codex/` into the container so agents 
 devctk init --image ubuntu:24.04 --agent claude --mirror --workspace ~/projects/myapp
 ```
 
-Workspace is mounted at the same absolute path inside the container. Agent session history (keyed by path) is shared between host and container.
+Workspace is mounted at the same absolute path inside the container. Agent session history (keyed by path) is shared between host and container — so you can resume a host session from inside:
+
+```sh
+podman exec -it myapp-a3f2b1c0 bash -lc "cd ~/projects/myapp && claude --dangerously-skip-permissions --resume"
+```
 
 ### All together
 
