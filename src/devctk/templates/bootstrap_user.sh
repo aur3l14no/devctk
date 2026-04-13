@@ -25,7 +25,7 @@ fi
 # Handle UID
 uid_owner=$(getent passwd "$container_uid" 2>/dev/null | cut -d: -f1 || true)
 if [ -n "$uid_owner" ] && [ "$uid_owner" != "$container_user" ]; then
-    usermod -l "$container_user" -d "$container_home" -m -g "$container_gid" -s "$shell" "$uid_owner"
+    usermod -l "$container_user" -d "$container_home" -g "$container_gid" -s "$shell" "$uid_owner"
 elif id -u "$container_user" >/dev/null 2>&1; then
     usermod -u "$container_uid" -d "$container_home" -g "$container_gid" -s "$shell" "$container_user"
 else
