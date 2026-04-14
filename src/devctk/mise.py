@@ -4,29 +4,27 @@ from __future__ import annotations
 
 from pathlib import Path
 
+CONTAINER_MISE_DIR = "/opt/mise"
 
-def mise_dir() -> Path:
+# Shell snippet for /etc/profile.d — discovers mise tools at login time
+# so PATH stays in sync with whatever is on the host mount.
+# Skips symlinks (latest, major aliases) to avoid duplicate entries.
+MISE_PROFILE_SNIPPET = """\
+for d in /opt/mise/*/*; do
+  [ -d "$d" ] && [ ! -L "$d" ] || continue
+  if [ -d "$d/bin" ]; then PATH="$d/bin:$PATH"; else PATH="$d:$PATH"; fi
+done
+export PATH
+"""
+
+
+def _host_mise_dir() -> Path:
     return Path.home() / ".local" / "share" / "mise" / "installs"
 
 
 def mise_mounts() -> list[tuple[str, str, str]]:
     """Return (host_path, container_path, mode) tuples for mise installs (read-only)."""
-    md = mise_dir()
+    md = _host_mise_dir()
     if not md.is_dir():
         return []
-    return [(str(md), str(md), "ro")]
-
-
-def mise_path_entries() -> list[str]:
-    """Return PATH entries for mise-installed tools (unresolved symlink paths)."""
-    md = mise_dir()
-    if not md.is_dir():
-        return []
-    entries: list[str] = []
-    for tool in sorted(md.iterdir()):
-        latest = tool / "latest"
-        if not latest.exists():
-            continue
-        bindir = latest / "bin"
-        entries.append(str(bindir if bindir.is_dir() else latest))
-    return entries
+    return [(str(md), CONTAINER_MISE_DIR, "ro")]

@@ -35,7 +35,7 @@ ssh $USER@localhost -p 39000
 devctk init --image alpine:latest --nix --mise
 ```
 
-`--nix` mounts `/nix/store` and your user profile read-only. `--mise` mounts `~/.local/share/mise/installs`. Both set PATH so tools are available inside the container without rebuilding the image. Either flag works independently.
+`--nix` mounts `/nix/store` and your user profile read-only. `--mise` mounts host mise installs to `/opt/mise` read-only. Both set PATH so tools are available inside the container without rebuilding the image. Either flag works independently.
 
 ### With AI agent configs
 

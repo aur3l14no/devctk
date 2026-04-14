@@ -74,7 +74,7 @@ Without `--ssh`, access the container via `podman exec -it NAME bash`.
 
 Mounts `/nix/store`, `/etc/profiles/per-user/<user>`, and `/run/current-system` read-only. Uses unresolved symlink-tree paths so mounts survive `nixos-rebuild` + garbage collection.
 
-Also mounts `~/.local/share/mise/installs` if present (mise-managed tools).
+Also mounts `~/.local/share/mise/installs` to `/opt/mise` if present (mise-managed tools). Mounted outside `~/.local` to avoid poisoning home-directory ownership.
 
 Sets PATH via `-e` at container create time (for `podman exec` sessions) and writes `/etc/profile.d/` (for SSH login shells).
 

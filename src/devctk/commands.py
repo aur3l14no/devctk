@@ -115,18 +115,23 @@ def cmd_init(args: argparse.Namespace, passthrough: list[str]) -> int:
         for host, target, mode in nm:
             container_mounts.append(f"type=bind,src={host},target={target},{mode}")
         path_parts.extend(nix_path_entries(user))
+    mise_profile = ""
     if args.mise:
-        from devctk.mise import mise_mounts, mise_path_entries
+        from devctk.mise import mise_mounts, MISE_PROFILE_SNIPPET
         for host, target, mode in mise_mounts():
             container_mounts.append(f"type=bind,src={host},target={target},{mode}")
-        path_parts.extend(mise_path_entries())
+        mise_profile = MISE_PROFILE_SNIPPET
     if path_parts:
-        # profile.d script for SSH login shells (nix/mise + sbin dirs that some distros drop for non-root)
-        profile_parts = path_parts + ["/usr/local/sbin", "/usr/sbin", "/sbin"]
-        nix_profile_content = f'export PATH="{":".join(profile_parts)}:$PATH"\n'
-        # Full PATH for podman exec sessions (includes system paths)
+        # Full PATH for podman exec sessions (nix paths + system paths)
         full_path = path_parts + ["/usr/local/bin", "/usr/bin", "/bin", "/usr/sbin", "/sbin"]
         container_env.append(f"PATH={':'.join(full_path)}")
+    if path_parts or mise_profile:
+        # profile.d script for login shells (SSH, bash -l)
+        profile_lines = ""
+        if path_parts:
+            profile_parts = path_parts + ["/usr/local/sbin", "/usr/sbin", "/sbin"]
+            profile_lines = f'export PATH="{":".join(profile_parts)}:$PATH"\n'
+        nix_profile_content = profile_lines + mise_profile
 
     # Agent config dirs
     if args.agent:
