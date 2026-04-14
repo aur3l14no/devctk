@@ -18,7 +18,7 @@ Requires: Linux, Podman (rootless). Python 3.11+. systemd optional (for auto-sta
 
 ```sh
 devctk init --image ubuntu:24.04
-podman exec -it $USER-dev bash
+podman exec -it -w /home/$USER $USER-dev bash -l
 ```
 
 ### SSH-accessible persistent container (remote server)

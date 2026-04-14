@@ -44,7 +44,7 @@ Podman (rootless). systemd optional (for `--systemd` mode).
 
 ### Inline (default)
 
-Container is created, started, and bootstrapped directly via podman commands. No systemd units. The container stays running until stopped manually or the host reboots. Access via `podman exec -it NAME bash`.
+Container is created, started, and bootstrapped directly via podman commands. No systemd units. The container stays running until stopped manually or the host reboots. Access via `podman exec -it -w /home/$USER NAME bash -l`.
 
 ### Systemd (`--systemd`)
 
@@ -68,7 +68,7 @@ Container is managed by systemd user units with auto-restart and boot persistenc
 
 SSH access via `ssh user@localhost -p PORT`. Requires authorized keys. Installs sshd inside the container, binds to 127.0.0.1 only. With `--systemd`, managed by a separate unit that depends on the container unit.
 
-Without `--ssh`, access the container via `podman exec -it NAME bash`.
+Without `--ssh`, access the container via `podman exec -it -w /home/$USER NAME bash -l`.
 
 ### Nix (`--nix`)
 

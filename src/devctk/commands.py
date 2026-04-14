@@ -202,7 +202,7 @@ def cmd_init(args: argparse.Namespace, passthrough: list[str]) -> int:
     print(f"started {container_name}")
     if args.ssh:
         print(f"  ssh {user}@localhost -p {args.port}")
-    print(f"  podman exec -it {container_name} bash")
+    print(f"  podman exec -it -w {container_home} {container_name} bash -l")
 
     return 0
 
