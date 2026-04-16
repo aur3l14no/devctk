@@ -3,4 +3,4 @@ __pycache__/
 dist/
 build/
 .venv/
-.codex/
+.codex

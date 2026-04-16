@@ -43,7 +43,7 @@ devctk init --image alpine:latest --nix --mise
 devctk init --image ubuntu:24.04 --agent claude --agent codex
 ```
 
-Mounts `~/.claude/`, `~/.claude.json`, `~/.codex/` into the container so agents authenticate and pick up your settings.
+Mounts `~/.claude/`, `~/.claude.json`, `~/.codex/` into the container so agents authenticate and pick up your settings. `~/.agents/` (shared skills, etc.) is mounted too whenever any agent is requested.
 
 ### Mirror mode (same paths as host)
 
