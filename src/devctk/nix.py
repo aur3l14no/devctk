@@ -33,11 +33,19 @@ def provision_nix(user: str) -> Provision:
         print("warning: nix enabled but no Nix installation found", file=sys.stderr)
         return Provision()
 
-    path_entries: list[str] = []
+    # per-user profile wins over container std paths (user's tools first).
+    # System sw/bin goes to the tail so container binaries (sudo, less, ...)
+    # are preferred — the host setuid ones can't work under rootless userns.
+    head: list[str] = []
+    tail: list[str] = []
     profile_bin = Path(f"/etc/profiles/per-user/{user}/bin")
     if profile_bin.exists():
-        path_entries.append(str(profile_bin))
+        head.append(str(profile_bin))
     if _SYS_SW_BIN.exists():
-        path_entries.append(str(_SYS_SW_BIN))
+        tail.append(str(_SYS_SW_BIN))
 
-    return Provision(mounts=tuple(mounts), path_entries=tuple(path_entries))
+    return Provision(
+        mounts=tuple(mounts),
+        path_head=tuple(head),
+        path_tail=tuple(tail),
+    )

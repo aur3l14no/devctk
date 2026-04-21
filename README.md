@@ -5,8 +5,9 @@ Declarative rootless Podman dev containers with SSH, Nix, mise, and agent mounts
 `devctk` reads one config file, compares it with its recorded state, and applies the minimum needed plan:
 
 - `create` when a container is new
-- `recreate` when the canonical config changed
+- `recreate` when a runtime-affecting field changed (image, workspace, ssh, …)
 - `start` when the config matches but the container is missing or stopped
+- `update` when only metadata changed (e.g. `systemd` flipped); container keeps running
 - `destroy` when a container was removed from config
 
 Whitespace and TOML formatting do not matter. The comparison is done on a normalized semantic form, not the raw file text.
@@ -34,7 +35,7 @@ Requires:
 - `~/.local/state/devctk/state.json`
 - `~/.config/systemd/user/devctk.service`
 
-There is no daemon. The systemd unit is a oneshot user service that runs `devctk apply --yes --autostart-only` at login/boot.
+There is no daemon. The systemd unit is a oneshot user service that runs `devctk apply --yes --autostart-only` at login/boot. Autostart mode only starts containers marked `systemd = true` and never destroys anything — destructive changes are reserved for explicit `devctk apply`.
 
 ## Workflow
 
@@ -117,6 +118,8 @@ Omit the `[containers.ssh]` table to disable. When present:
   - `ssh.authorized_keys` (inline, non-empty)
 
 SSH binds to `127.0.0.1:<port>` only.
+
+Key file contents are copied into the container at create time; editing the host file after the fact does **not** propagate. To refresh the container with new keys: `devctk rm <name> && devctk apply`.
 
 ## Notes
 

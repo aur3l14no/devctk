@@ -27,20 +27,23 @@ class Mount:
 @dataclass(frozen=True, slots=True)
 class Provision:
     mounts: tuple[Mount, ...] = ()
-    path_entries: tuple[str, ...] = ()
+    path_head: tuple[str, ...] = ()  # prepended to PATH (wins over std)
+    path_tail: tuple[str, ...] = ()  # appended after std paths (fallback)
     profile_snippet: str = ""
 
     @staticmethod
     def combine(items: Iterable[Provision]) -> Provision:
         mounts: list[Mount] = []
-        paths: list[str] = []
+        head: list[str] = []
+        tail: list[str] = []
         snips: list[str] = []
         for p in items:
             mounts.extend(p.mounts)
-            paths.extend(p.path_entries)
+            head.extend(p.path_head)
+            tail.extend(p.path_tail)
             if p.profile_snippet:
                 snips.append(p.profile_snippet)
-        return Provision(tuple(mounts), tuple(paths), "\n".join(snips))
+        return Provision(tuple(mounts), tuple(head), tuple(tail), "\n".join(snips))
 
 
 def provision_workspace(ws: Workspace, container_home: str) -> Provision:

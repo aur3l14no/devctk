@@ -101,8 +101,10 @@ def plan_container(
     to care about.
     """
     if autostart_only:
-        if spec is not None and not spec.systemd:
-            spec = None
+        # Login-time reconcile: only ensure systemd=true specs are up.
+        # Never destroy anything — that's explicit `devctk apply` territory.
+        if spec is None or not spec.systemd:
+            return None
         if tracked is not None and not tracked.systemd:
             tracked = None
 

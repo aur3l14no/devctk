@@ -1,31 +1,12 @@
-# Detect package manager
-pm=none
-command -v apt-get >/dev/null 2>&1 && pm=apt
-if [ "$pm" = "none" ]; then
-    command -v apk >/dev/null 2>&1 && pm=apk
-fi
-
-# Install sudo if missing
-if ! command -v sudo >/dev/null 2>&1; then
-    case "$pm" in
-        apt)
-            export DEBIAN_FRONTEND=noninteractive
-            apt-get update -qq && apt-get install -y --no-install-recommends sudo
-            ;;
-        apk)
-            apk add --no-cache sudo shadow
-            ;;
-        *)
-            echo "sudo missing and no supported package manager" >&2
-            exit 1
-            ;;
-    esac
-fi
-
-# Install bash if missing
-if ! command -v bash >/dev/null 2>&1; then
-    case "$pm" in
-        apk) apk add --no-cache bash ;;
-        *) : ;;
-    esac
+# Install sudo if missing.
+#
+# Use an explicit path instead of `command -v sudo`: when --nix is on, the
+# host's /run/current-system/sw/bin is mounted into the container and may
+# contain a setuid sudo that can never work under rootless userns. That
+# would shadow a real install decision. Checking /usr/bin/sudo directly
+# ensures we always put the container's own sudo in place.
+if ! [ -x /usr/bin/sudo ]; then
+    export DEBIAN_FRONTEND=noninteractive
+    apt-get update -qq
+    apt-get install -y --no-install-recommends sudo
 fi

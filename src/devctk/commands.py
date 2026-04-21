@@ -528,17 +528,17 @@ _STD_PATHS = ("/usr/local/bin", "/usr/bin", "/bin", "/usr/sbin", "/sbin")
 
 
 def _env_from_provision(p: Provision) -> list[str]:
-    if not p.path_entries:
+    if not p.path_head and not p.path_tail:
         return []
-    full = list(p.path_entries) + list(_STD_PATHS)
+    full = list(p.path_head) + list(_STD_PATHS) + list(p.path_tail)
     return [f"PATH={':'.join(full)}"]
 
 
 def _profile_from_provision(p: Provision) -> str:
     lines = ""
-    if p.path_entries:
+    if p.path_head:
         # login-shell PATH also exports sbins
-        entries = list(p.path_entries) + ["/usr/local/sbin", "/usr/sbin", "/sbin"]
+        entries = list(p.path_head) + ["/usr/local/sbin", "/usr/sbin", "/sbin"]
         lines = f'export PATH="{":".join(entries)}:$PATH"\n'
     if p.profile_snippet:
         lines += p.profile_snippet
