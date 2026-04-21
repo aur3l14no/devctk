@@ -2,41 +2,42 @@
 
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 
+from devctk.provision import Mount, Provision
 
-def nix_mounts(host_user: str) -> list[tuple[str, str, str]]:
-    """Return (host_path, container_path, mode) tuples for nix mounts.
+
+_NIX_STORE = Path("/nix/store")
+_SYS_CURRENT = Path("/run/current-system")
+_SYS_SW_BIN = Path("/run/current-system/sw/bin")
+
+
+def provision_nix(user: str) -> Provision:
+    """Mount /nix/store + per-user profile + current-system, read-only.
 
     Uses unresolved symlink-tree paths so they survive nixos-rebuild + GC.
     """
-    mounts: list[tuple[str, str, str]] = []
+    mounts: list[Mount] = []
+    if _NIX_STORE.is_dir():
+        mounts.append(Mount(_NIX_STORE, str(_NIX_STORE), "ro"))
 
-    nix_store = Path("/nix/store")
-    if nix_store.is_dir():
-        mounts.append((str(nix_store), str(nix_store), "ro"))
-
-    profile = Path(f"/etc/profiles/per-user/{host_user}")
+    profile = Path(f"/etc/profiles/per-user/{user}")
     if profile.exists():
-        mounts.append((str(profile), str(profile), "ro"))
+        mounts.append(Mount(profile, str(profile), "ro"))
 
-    sys_sw = Path("/run/current-system")
-    if sys_sw.exists():
-        mounts.append((str(sys_sw), str(sys_sw), "ro"))
+    if _SYS_CURRENT.exists():
+        mounts.append(Mount(_SYS_CURRENT, str(_SYS_CURRENT), "ro"))
 
-    return mounts
+    if not mounts:
+        print("warning: nix enabled but no Nix installation found", file=sys.stderr)
+        return Provision()
 
-
-def nix_path_entries(host_user: str) -> list[str]:
-    """Return PATH entries for nix binaries (unresolved symlink paths)."""
-    entries: list[str] = []
-
-    profile_bin = Path(f"/etc/profiles/per-user/{host_user}/bin")
+    path_entries: list[str] = []
+    profile_bin = Path(f"/etc/profiles/per-user/{user}/bin")
     if profile_bin.exists():
-        entries.append(str(profile_bin))
+        path_entries.append(str(profile_bin))
+    if _SYS_SW_BIN.exists():
+        path_entries.append(str(_SYS_SW_BIN))
 
-    sys_bin = Path("/run/current-system/sw/bin")
-    if sys_bin.exists():
-        entries.append(str(sys_bin))
-
-    return entries
+    return Provision(mounts=tuple(mounts), path_entries=tuple(path_entries))

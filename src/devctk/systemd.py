@@ -1,49 +1,23 @@
-"""Render systemd user unit files from embedded templates."""
+"""Render the global devctk user service."""
 
 from __future__ import annotations
 
 from string import Template
 
-TEMPLATES = {
-    "container": """\
+SERVICE_TEMPLATE = """\
 [Unit]
-Description=devctk container $container_name
+Description=devctk autostart reconcile
 
 [Service]
-Type=simple
-TimeoutStartSec=300
-TimeoutStopSec=15
-Restart=on-failure
-RestartSec=5
-ExecStartPre=$container_helper create
-ExecStart=$container_helper start
-ExecStartPost=$bootstrap_helper
-ExecStop=$container_helper stop
+Type=oneshot
+TimeoutStartSec=900
+Environment=PATH=$path
+ExecStart=$python -m devctk apply --yes --autostart-only
 
 [Install]
 WantedBy=default.target
-""",
-    "sshd": """\
-[Unit]
-Description=devctk sshd in $container_name
-Requires=$container_unit
-After=$container_unit
-BindsTo=$container_unit
-PartOf=$container_unit
-
-[Service]
-Type=simple
-TimeoutStartSec=300
-Restart=always
-RestartSec=5
-ExecStart=$sshd_helper start
-ExecStop=$sshd_helper stop
-
-[Install]
-WantedBy=default.target
-""",
-}
+"""
 
 
-def render_unit(kind: str, **values: str) -> str:
-    return Template(TEMPLATES[kind]).substitute(values)
+def render_service_unit(*, python: str, path: str) -> str:
+    return Template(SERVICE_TEMPLATE).substitute(python=python, path=path)

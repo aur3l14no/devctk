@@ -4,7 +4,15 @@ import os
 import pathlib
 from dataclasses import dataclass
 
+CONFIG_DIR_NAME = "devctk"
 STATE_DIR_NAME = "devctk"
+
+
+def config_root() -> pathlib.Path:
+    xdg = os.environ.get("XDG_CONFIG_HOME")
+    if xdg:
+        return pathlib.Path(xdg).expanduser()
+    return pathlib.Path.home() / ".config"
 
 
 def state_root() -> pathlib.Path:
@@ -16,27 +24,25 @@ def state_root() -> pathlib.Path:
 
 @dataclass(frozen=True)
 class ManagedPaths:
+    config_dir: pathlib.Path
+    config_file: pathlib.Path
     units_dir: pathlib.Path
-    helper_dir: pathlib.Path
-    metadata: pathlib.Path
-    container_unit: pathlib.Path
-    container_helper: pathlib.Path
-    bootstrap_helper: pathlib.Path
-    sshd_unit: pathlib.Path
-    sshd_helper: pathlib.Path
+    service_unit: pathlib.Path
+    service_name: str
+    state_dir: pathlib.Path
+    runtime_state: pathlib.Path
 
 
-def managed_paths(name: str) -> ManagedPaths:
-    home = pathlib.Path.home()
-    units = home / ".config" / "systemd" / "user"
-    helpers = state_root() / STATE_DIR_NAME
+def managed_paths() -> ManagedPaths:
+    config_dir = config_root() / CONFIG_DIR_NAME
+    state_dir = state_root() / STATE_DIR_NAME
+    units_dir = config_root() / "systemd" / "user"
     return ManagedPaths(
-        units_dir=units,
-        helper_dir=helpers,
-        metadata=helpers / f"{name}.json",
-        container_unit=units / f"{name}.service",
-        container_helper=helpers / f"{name}-container.sh",
-        bootstrap_helper=helpers / f"{name}-bootstrap.sh",
-        sshd_unit=units / f"{name}-sshd.service",
-        sshd_helper=helpers / f"{name}-sshd.sh",
+        config_dir=config_dir,
+        config_file=config_dir / "config.toml",
+        units_dir=units_dir,
+        service_unit=units_dir / "devctk.service",
+        service_name="devctk.service",
+        state_dir=state_dir,
+        runtime_state=state_dir / "state.json",
     )

@@ -4,12 +4,14 @@ from __future__ import annotations
 
 from pathlib import Path
 
-CONTAINER_MISE_DIR = "/opt/mise"
+from devctk.provision import Mount, Provision
 
-# Shell snippet for /etc/profile.d — discovers mise tools at login time
-# so PATH stays in sync with whatever is on the host mount.
-# Skips symlinks (latest, major aliases) to avoid duplicate entries.
-MISE_PROFILE_SNIPPET = """\
+_CONTAINER_MISE_DIR = "/opt/mise"
+
+# /etc/profile.d snippet — discovers mise tools at login time so PATH
+# stays in sync with whatever is on the host mount. Skips symlinks
+# (latest, major aliases) to avoid duplicate entries.
+_MISE_PROFILE_SNIPPET = """\
 for d in /opt/mise/*/*; do
   [ -d "$d" ] && [ ! -L "$d" ] || continue
   if [ -d "$d/bin" ]; then PATH="$d/bin:$PATH"; else PATH="$d:$PATH"; fi
@@ -18,13 +20,11 @@ export PATH
 """
 
 
-def _host_mise_dir() -> Path:
-    return Path.home() / ".local" / "share" / "mise" / "installs"
-
-
-def mise_mounts() -> list[tuple[str, str, str]]:
-    """Return (host_path, container_path, mode) tuples for mise installs (read-only)."""
-    md = _host_mise_dir()
-    if not md.is_dir():
-        return []
-    return [(str(md), CONTAINER_MISE_DIR, "ro")]
+def provision_mise() -> Provision:
+    host = Path.home() / ".local" / "share" / "mise" / "installs"
+    if not host.is_dir():
+        return Provision()
+    return Provision(
+        mounts=(Mount(host, _CONTAINER_MISE_DIR, "ro"),),
+        profile_snippet=_MISE_PROFILE_SNIPPET,
+    )
