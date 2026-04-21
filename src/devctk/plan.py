@@ -97,12 +97,17 @@ def plan_container(
 ) -> PlanStep | None:
     """Decide the single-container plan step.
 
-    Returns None when (after autostart filtering) there's nothing for us
-    to care about.
+    Semantics:
+      - autostart_only=False (normal apply): full reconcile. Any of
+        Create/Recreate/Start/Update/Destroy/Noop may come out.
+      - autostart_only=True (login-time): only non-destructive steps.
+        Destructive cases (Destroy, Recreate) collapse to None so the
+        login service never nukes or rebuilds a container. The user must
+        run `devctk apply` explicitly to apply drift.
     """
     if autostart_only:
-        # Login-time reconcile: only ensure systemd=true specs are up.
-        # Never destroy anything — that's explicit `devctk apply` territory.
+        # Autostart only concerns systemd=true specs; entries tracked
+        # with systemd=false are not this mode's business.
         if spec is None or not spec.systemd:
             return None
         if tracked is not None and not tracked.systemd:
@@ -112,11 +117,14 @@ def plan_container(
         return None
     if spec is None:
         assert tracked is not None
-        return Destroy(name=name, previous=tracked.spec)
+        return Destroy(name=name, previous=tracked.spec)  # autostart returned None above
 
     if tracked is None:
         if live.status is LiveStatus.MISSING:
             return Create(spec=spec)
+        # An unrelated container already holds this name.
+        if autostart_only:
+            return None  # don't Recreate at login; wait for explicit apply
         return Recreate(
             spec=spec,
             changes=diff_fingerprints(None, full_fingerprint(spec)),
@@ -125,7 +133,12 @@ def plan_container(
 
     current = full_fingerprint(spec)
     if runtime_hash(spec) != tracked.runtime_hash:
+        # Runtime drift requires a destroy+rebuild.
+        if autostart_only:
+            return None  # skip at login; wait for explicit apply
         return Recreate(spec=spec, changes=diff_fingerprints(tracked.spec, current))
+
+    # From here down every branch is non-destructive — safe in either mode.
     if live.status is LiveStatus.MISSING:
         return Create(spec=spec, reason="container is missing")
     if live.status is LiveStatus.STOPPED:

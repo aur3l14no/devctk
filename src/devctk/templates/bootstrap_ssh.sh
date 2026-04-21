@@ -1,21 +1,8 @@
 # --- SSH ---
-need_sshd=false
-test -x /usr/sbin/sshd || need_sshd=true
-
-if $need_sshd; then
-    case "$pm" in
-        apt)
-            export DEBIAN_FRONTEND=noninteractive
-            apt-get update -qq && apt-get install -y --no-install-recommends openssh-server
-            ;;
-        apk)
-            apk add --no-cache openssh
-            ;;
-        *)
-            echo "sshd missing and no supported package manager" >&2
-            exit 1
-            ;;
-    esac
+if ! [ -x /usr/sbin/sshd ]; then
+    export DEBIAN_FRONTEND=noninteractive
+    apt-get update -qq
+    apt-get install -y --no-install-recommends openssh-server
 fi
 
 mkdir -p /run/sshd /etc/ssh/authorized_keys /etc/ssh/sshd_config.d
