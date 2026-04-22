@@ -26,6 +26,7 @@ Requires:
 - Podman rootless
 - Python 3.11+
 - systemd user services if you want autostart
+- Debian/Ubuntu base image
 
 ## Files
 
@@ -103,7 +104,7 @@ All default to off / empty when omitted.
 
 Omit the `[containers.workspace]` table to disable. When present:
 
-- `workspace.path`: absolute host path (required)
+- `workspace.path`: absolute host path (required, must already exist)
 - `workspace.mirror` (bool, default `false`): mount at the same absolute path inside the container; otherwise mounted at `$HOME/workspace`
 
 When `mirror = true`, `devctk` refuses to mount your entire home directory as the workspace root.

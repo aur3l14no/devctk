@@ -20,7 +20,7 @@ from devctk.agent import provision_agents
 from devctk.helpers import build_create_cmd, render_bootstrap
 from devctk.mise import provision_mise
 from devctk.nix import provision_nix
-from devctk.paths import ManagedPaths, managed_paths
+from devctk.paths import ManagedPaths, config_root, managed_paths, state_root
 from devctk.plan import (
     Create,
     Destroy,
@@ -86,7 +86,10 @@ def cmd_apply(args: argparse.Namespace) -> int:
         return 0
 
     _confirm_apply(changed, args.yes)
-    execute_plan(plan, state, paths=paths, podman=podman)
+    try:
+        execute_plan(plan, state, paths=paths, podman=podman)
+    except SpecError as exc:
+        raise SystemExit(str(exc)) from exc
     if not args.autostart_only:
         _sync_autostart_service(paths, config, podman)
     return 0
@@ -564,7 +567,15 @@ def _sync_autostart_service(paths: ManagedPaths, config: AppConfig, podman: str)
         return
 
     unit_path = os.pathsep.join((os.path.dirname(podman), *_STD_PATHS))
-    write_text(paths.service_unit, render_service_unit(python=sys.executable, path=unit_path))
+    write_text(
+        paths.service_unit,
+        render_service_unit(
+            python=sys.executable,
+            path=unit_path,
+            xdg_config_home=str(config_root()),
+            xdg_state_home=str(state_root()),
+        ),
+    )
     run([systemctl, "--user", "daemon-reload"])
     run([systemctl, "--user", "enable", paths.service_name])
 

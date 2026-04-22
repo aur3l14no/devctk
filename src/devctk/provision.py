@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable, Literal
 
-from devctk.spec import Workspace, WorkspaceOff, WorkspaceOn
+from devctk.spec import SpecError, Workspace, WorkspaceOff, WorkspaceOn
 
 
 @dataclass(frozen=True, slots=True)
@@ -49,6 +49,7 @@ class Provision:
 def provision_workspace(ws: Workspace, container_home: str) -> Provision:
     if isinstance(ws, WorkspaceOff):
         return Provision()
-    ws.path.mkdir(parents=True, exist_ok=True)
+    if not ws.path.is_dir():
+        raise SpecError(f"workspace path does not exist: {ws.path}")
     target = str(ws.path) if ws.mirror else f"{container_home}/workspace"
     return Provision(mounts=(Mount(ws.path, target, "rw"),))
