@@ -35,6 +35,10 @@ fi
 mkdir -p "$container_home" /etc/sudoers.d
 chown "$container_uid:$container_gid" "$container_home" 2>/dev/null || true
 
-# Passwordless sudo
-printf '%s ALL=(ALL) NOPASSWD:ALL\n' "$container_user" >@@SUDOERS@@
+# Passwordless sudo. Defaults: line covers `sudo -v`-style validation:
+# base images often add the renamed user to the sudo group, and the
+# stock `%sudo ALL=(ALL:ALL) ALL` rule lacks NOPASSWD, so -v prompts
+# even though our NOPASSWD wins for actual commands.
+printf 'Defaults:%s !authenticate\n%s ALL=(ALL) NOPASSWD:ALL\n' \
+    "$container_user" "$container_user" >@@SUDOERS@@
 chmod 440 @@SUDOERS@@
