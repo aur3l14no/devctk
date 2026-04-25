@@ -1,134 +1,98 @@
 # devctk
 
-Declarative rootless Podman dev containers with SSH, Nix, mise, and agent mounts.
+![devctk — agent container & dev container](docs/promo.png)
 
-`devctk` reads one config file, compares it with its recorded state, and applies the minimum needed plan:
+> **Frustrated by any of these?**
+>
+> - Running `claude --dangerously-skip-permissions` or `codex --full-auto` as your laptop user, hoping it doesn't touch the wrong file
+> - Wanting a clean per-project shell that still has your host nix, mise, and the project at its real path — without baking a Dockerfile, without sudo
+> - Wanting an agent to help on a remote dev box, but having no clean way to keep its runtime separate from yours
 
-- `create` when a container is new
-- `recreate` when a runtime-affecting field changed (image, workspace, ssh, …)
-- `start` when the config matches but the container is missing or stopped
-- `update` when only metadata changed (e.g. `systemd` flipped); container keeps running
-- `destroy` when a container was removed from config
-
-Whitespace and TOML formatting do not matter. The comparison is done on a normalized semantic form, not the raw file text.
-
-## Install
+devctk fixes all three with **rootless Podman** and one TOML file. No sudo anywhere. No Dockerfiles to maintain. No daemon.
 
 ```sh
 uv tool install devctk
 ```
 
-`pip install devctk` also works, but `uv tool install` is the cleaner path if you want systemd autostart.
+## Two patterns it nails
 
-Requires:
+### ① distrobox-style dev shell — your tools, contained, SSH-ready
 
-- Linux
-- Podman rootless
-- Python 3.11+
-- systemd user services if you want autostart
-- Debian/Ubuntu base image
+You want a clean per-project shell. You also want your host nix and mise on `PATH`, and your project visible at its real path so editor and terminal agree. You don't want to bake a Dockerfile, and you don't have sudo.
 
-## Files
-
-`devctk` writes only these XDG-managed files:
-
-- `~/.config/devctk/config.toml`
-- `~/.local/state/devctk/state.json`
-- `~/.config/systemd/user/devctk.service`
-
-There is no daemon. The systemd unit is a oneshot user service that runs `devctk apply --yes --autostart-only` at login/boot. Autostart mode only starts containers marked `systemd = true` and never destroys anything — destructive changes are reserved for explicit `devctk apply`.
-
-## Workflow
-
-1. Write `~/.config/devctk/config.toml`
-2. Run `devctk apply`
-3. Review the plan and type `yes`
-
-For non-interactive runs:
-
-```sh
-devctk apply --yes
-```
-
-Useful commands:
-
-```sh
-devctk apply
-devctk ls
-devctk rm mydev
-devctk rm --all
-```
-
-`rm` removes the live container and tracked state entry. If the container is still present in `config.toml`, the next `apply` will recreate it.
-
-## Config
-
-Example:
+Same shape as distrobox, declarative, with optional SSH for VS Code Remote / Cursor / `ssh + nvim`:
 
 ```toml
 [[containers]]
-name = "cuda-dev"
-image = "docker.io/nvidia/cuda:13.2.0-cudnn-devel-ubuntu24.04"
+name = "myproj"
+image = "docker.io/library/ubuntu:24.04"
 systemd = true
-agents = ["codex"]
-extra_create_args = [
-  "--device",
-  "nvidia.com/gpu=GPU-ee39c837-99ea-9171-0657-825e2273a414",
-  "--shm-size=32G",
-  "--mount",
-  "type=bind,src=/mnt/data/projects/robotics-2601,target=/data,ro",
-]
+nix = true
+mise = true
 
 [containers.workspace]
 path = "/home/y/Projects/myproj"
 mirror = true
 
 [containers.ssh]
-port = 39004
+port = 39010
 authorized_keys_file = "/home/y/.ssh/container_authorized_keys"
 ```
 
-### Container fields
+On the laptop:
 
-All default to off / empty when omitted.
-
-- `name`: Podman container name
-- `image`: base image
-- `systemd` (bool): include this container in the global autostart service
-- `nix` (bool): mount host Nix store and profiles read-only, then expose them on `PATH`
-- `mise` (bool): mount host mise installs read-only, then expose them on `PATH`
-- `agents`: any of `claude`, `codex`
-- `extra_create_args`: raw extra `podman create` argv tokens
-
-### Workspace
-
-Omit the `[containers.workspace]` table to disable. When present:
-
-- `workspace.path`: absolute host path (required, must already exist)
-- `workspace.mirror` (bool, default `false`): mount at the same absolute path inside the container; otherwise mounted at `$HOME/workspace`
-
-When `mirror = true`, `devctk` refuses to mount your entire home directory as the workspace root.
-
-### SSH
-
-Omit the `[containers.ssh]` table to disable. When present:
-
-- `ssh.port` (required)
-- exactly one of:
-  - `ssh.authorized_keys_file` (must exist and be non-empty at apply time)
-  - `ssh.authorized_keys` (inline, non-empty)
-
-SSH binds to `127.0.0.1:<port>` only.
-
-Key file contents are copied into the container at create time; editing the host file after the fact does **not** propagate. To refresh the container with new keys: `devctk rm <name> && devctk apply`.
-
-## Notes
-
-- `devctk` is intentionally conservative about Podman-specific features. Most raw Podman knobs should go into `extra_create_args`.
-- `extra_create_args` may include things like `--mount`, `--device`, and `--shm-size`.
-- Conflicts between `extra_create_args` and devctk-managed options are left to Podman to reject.
-- If any container has `systemd = true`, enable linger for the user if you want autostart after reboot:
-
-```sh
-sudo loginctl enable-linger "$USER"
+```ssh-config
+Host myproj
+  HostName 127.0.0.1
+  Port 39010
+  ProxyJump workstation   # omit if running locally
 ```
+
+### ② Agent in a YOLO sandbox — same isolation, no shared host
+
+You want `claude --dangerously-skip-permissions` or `codex --full-auto` to do its thing without you babysitting every approval. You don't want it running as your laptop user with reach into your shell history, ssh keys, and unrelated projects. devctk puts it in a container with `~/.claude` and `~/.codex` bind-mounted rw (so logins persist across recreates) and host `/nix/store` + mise mounted in (so the agent has the same toolchain you do).
+
+```toml
+[[containers]]
+name = "myproj-agent"
+image = "docker.io/library/ubuntu:24.04"
+agents = ["claude", "codex"]
+nix = true
+mise = true
+
+[containers.workspace]
+path = "/home/y/Projects/myproj"
+mirror = true
+```
+
+`devctk apply` → `podman exec -it myproj-agent bash` → `claude --dangerously-skip-permissions` and walk away.
+
+### Bonus combo — local agent, remote dev container
+
+The cool one. Run the agent container on your machine and the dev container on a remote (lab box, GPU server, anywhere). The agent reaches the dev box over two channels: `ssh` for commands, `sshfs` for files.
+
+```mermaid
+flowchart LR
+  A["Agent container<br/>(your machine)"] == "ssh cmd" ==> D["Dev container<br/>(remote)"]
+  D -. "files via sshfs" .-> A
+```
+
+This is exactly the decoupling [Anthropic's managed-agents writeup](https://www.anthropic.com/engineering/managed-agents) argues for: the agent's runtime stays separate from the environment it acts on, joined only by `ssh` and `sshfs`.
+
+## Rootless, no sudo
+
+Everything devctk does runs as your unprivileged user:
+
+- Podman runs rootless
+- The autostart unit is a user-level systemd oneshot
+- `sudo loginctl enable-linger "$USER"` is the **only** place `sudo` shows up, and only if you want autostart to survive a full reboot before you log in
+
+## How it works, in one paragraph
+
+`devctk` reads `~/.config/devctk/config.toml`, diffs it against a normalized state file, and applies the minimum plan: **create** a new container, **recreate** when a runtime field changed, **start** when stopped, **update** when only metadata changed, **destroy** when you removed it from config. No daemon. Whitespace and TOML formatting never force a recreate — the diff runs on semantic form. Containers marked `systemd = true` come back via a user-level oneshot at login/boot.
+
+## More
+
+- [QUICKSTART.md](QUICKSTART.md) — install, systemd autostart, full config reference, `apply` / `ls` / `rm` lifecycle
+- Requires Linux, rootless Podman, Python 3.11+, and a Debian/Ubuntu base image
+- MIT licensed
