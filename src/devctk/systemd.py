@@ -10,6 +10,8 @@ Description=devctk autostart reconcile
 
 [Service]
 Type=oneshot
+RemainAfterExit=yes
+KillMode=process
 TimeoutStartSec=900
 Environment=PATH=$path
 Environment=XDG_CONFIG_HOME=$xdg_config_home
