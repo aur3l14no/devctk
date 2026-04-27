@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "devctk"
-version = "0.4.0"
+version = "0.4.1"
 description = "Declarative rootless Podman dev containers with SSH, Nix, mise, and agent support"
 requires-python = ">=3.11"
 license = "MIT"
